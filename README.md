@@ -79,7 +79,7 @@ music_ai/
 后端 `.env` 文件配置：
 
 ```
-DEEPSEEK_API_KEY=sk-7010e5b6517c485886b3422c6b6cc6c3
+DEEPSEEK_API_KEY=
 JWT_SECRET=your_secret_here
 DATABASE_URL=sqlite:///./music_ai.db
 ```
