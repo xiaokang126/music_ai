@@ -1,0 +1,25 @@
+# 环境变量（含 API Key，绝对不能上传）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.egg-info/
+dist/
+
+# Node / 前端
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
