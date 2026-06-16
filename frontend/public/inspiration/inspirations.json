@@ -1,0 +1,20 @@
+[
+  {
+    "title": "毕业操场傍晚",
+    "theme": "毕业",
+    "emotion": "nostalgic",
+    "description": "夕阳、跑道、朋友挥手，适合校园回忆模板和吉他/钢琴轻鼓。"
+  },
+  {
+    "title": "产品开箱三连击",
+    "theme": "商品",
+    "emotion": "excited",
+    "description": "开箱、细节、价格字幕三段式，适合商品种草模板和 hit/impact 卡点。"
+  },
+  {
+    "title": "雨夜独白",
+    "theme": "情绪",
+    "emotion": "sad",
+    "description": "窗边雨声和旁白，人声区间需 ducking，适合钢琴弦乐。"
+  }
+]

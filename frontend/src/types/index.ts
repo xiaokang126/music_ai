@@ -1,131 +1,257 @@
-export interface MusicParams {
-  scale: string;
-  tempo: number;
-  chord_progression: string[];
-  rhythm_style: string;
-  melody_contour: string;
-  instrument: string;
-  mood: string;
-  description?: string;
+// ========== Enums / Union Types ==========
+
+export type VideoType =
+  | 'healing_vlog'
+  | 'product_promo'
+  | 'hype_edit'
+  | 'campus_memory'
+  | 'emotional_story'
+  | 'knowledge_edu';
+
+export type EmotionType =
+  | 'calm'
+  | 'warm'
+  | 'happy'
+  | 'intense'
+  | 'sad'
+  | 'excited'
+  | 'nostalgic'
+  | 'mysterious'
+  | 'energetic';
+
+export type InstrumentType =
+  | 'soft_piano'
+  | 'acoustic_guitar'
+  | 'pad'
+  | 'orchestral'
+  | 'lofi_beats'
+  | 'synth'
+  | 'full_band'
+  | 'electronic'
+  | 'piano_with_pad'
+  | 'piano_with_strings'
+  | 'electronic_beat';
+
+export type BeatPattern =
+  | 'simple_kick_snare'
+  | 'energetic_beat'
+  | 'lofi_beat'
+  | 'trap_hats';
+
+export type FadeType = 'fade_in' | 'fade_out' | 'fade_out_start';
+
+// ========== Video Analysis Types ==========
+
+export interface VideoProfile {
+  id: string;
+  duration_seconds: number;
+  video_type: VideoType;
+  overall_emotion: EmotionType;
+  scenes: SceneInfo[];
 }
 
-export interface MusicWork {
-  id: number;
+export interface SceneInfo {
+  index: number;
+  start_time: number;
+  end_time: number;
+  description: string;
+  emotion: EmotionType;
+  intensity: number;
+}
+
+export interface KeyEvent {
+  timestamp: number;
+  event_type: string;
+  description: string;
+  importance: number;
+}
+
+export interface SceneChangeCandidate {
+  timestamp: number;
+  confidence: number;
+  change_type: string;
+}
+
+export interface VoiceRegion {
+  start_time: number;
+  end_time: number;
+  voice_type: string;
+  content_preview: string;
+}
+
+export interface CaptionEvent {
+  timestamp: number;
+  text: string;
+  duration: number;
+  style: string;
+}
+
+export interface EmotionPoint {
+  timestamp: number;
+  emotion: EmotionType;
+  intensity: number;
+}
+
+// ========== Music Generation Types ==========
+
+export interface MusicTimeline {
+  segments: TimelineSegment[];
+  total_duration: number;
+  global_key: string;
+  global_tempo: number;
+}
+
+export interface TimelineSegment {
+  start_time: number;
+  end_time: number;
+  emotion: EmotionType;
+  intensity: number;
+  instruments: InstrumentType[];
+  beat_pattern: BeatPattern;
+  chord_progression: string[];
+  description: string;
+}
+
+export interface SFXNode {
+  timestamp: number;
+  sfx_type: string;
+  description: string;
+  duration: number;
+  volume: number;
+}
+
+export interface DuckingNode {
+  start_time: number;
+  end_time: number;
+  duck_amount_db: number;
+  reason: string;
+}
+
+// ========== Project Types ==========
+
+export interface VideoProject {
+  id: string;
   user_id: number;
   title: string;
-  mood_tag: string;
-  params_json: string;
-  reply_to_work_id: number | null;
-  is_public: boolean;
-  likes_count: number;
-  description: string;
+  status: 'draft' | 'analyzing' | 'generating' | 'mixing' | 'completed' | 'failed';
+  video_url: string;
+  video_profile: VideoProfile | null;
+  music_timeline: MusicTimeline | null;
+  sfx_nodes: SFXNode[];
+  ducking_nodes: DuckingNode[];
+  final_audio_url: string | null;
+  export_url: string | null;
   created_at: string;
-  username: string;
-  avatar: string;
-  reply_count: number;
-  gift_count: number;
-  comment_count: number;
-  replies?: MusicWork[];
+  updated_at: string;
 }
 
-export interface User {
+export interface GenerationSession {
+  id: string;
+  project_id: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  current_step: string;
+  progress: number;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface ExportTask {
+  id: string;
+  project_id: string;
+  format: 'mp4' | 'mov' | 'webm';
+  quality: '1080p' | '720p' | '480p';
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  download_url: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+// ========== Community Types ==========
+
+export interface CommunityPost {
   id: number;
+  user_id: number;
   username: string;
   avatar: string;
+  project_id: string;
+  title: string;
+  description: string;
+  video_url: string;
+  likes_count: number;
+  comments_count: number;
   created_at: string;
 }
 
 export interface Comment {
   id: number;
-  work_id: number;
+  post_id: number;
   user_id: number;
-  content: string;
   username: string;
   avatar: string;
+  content: string;
   created_at: string;
 }
 
-export interface EmotionDiary {
-  id: number;
-  user_id: number;
-  mood_tag: string;
-  mood_score: number;
-  note: string;
-  work_id: number | null;
+// ========== User Types ==========
+
+export interface User {
+  id: string;
+  username: string;
+  avatar_url?: string;
+  avatar?: string;
   created_at: string;
 }
 
-export interface HealingPlan {
-  id: number;
-  name: string;
-  description: string;
-  duration_days: number;
-  cover_icon: string;
-  tasks_json: string;
+export interface LoginForm {
+  username: string;
+  password: string;
 }
 
-export interface UserHealingPlan {
-  id: number;
-  user_id: number;
-  plan_id: number;
-  current_day: number;
-  start_date: string;
-  completed_tasks_json: string;
-  is_completed: number;
-  plan_name: string;
-  duration_days: number;
-  tasks_json: string;
+export interface RegisterForm {
+  username: string;
+  password: string;
 }
 
-export interface Gift {
-  id: number;
-  name: string;
-  icon: string;
-  type: string;
-}
+// ========== Video Type Labels ==========
 
-export interface WorkGift {
-  id: number;
-  work_id: number;
-  sender_id: number;
-  gift_id: number;
-  sender_name: string;
-  gift_name: string;
-  gift_icon: string;
-  created_at: string;
-}
+export const VIDEO_TYPE_LABELS: Record<VideoType, string> = {
+  healing_vlog: '治愈Vlog',
+  product_promo: '产品推广',
+  hype_edit: '高燃混剪',
+  campus_memory: '校园记忆',
+  emotional_story: '情感故事',
+  knowledge_edu: '知识教育',
+};
 
-export interface ResonanceWork extends MusicWork {
-  match_score: number;
-}
+export const EMOTION_LABELS: Record<EmotionType, string> = {
+  calm: '平静',
+  warm: '温暖',
+  happy: '快乐',
+  intense: '激烈',
+  sad: '忧伤',
+  excited: '兴奋',
+  nostalgic: '怀旧',
+  mysterious: '神秘',
+  energetic: '活力',
+};
 
-export interface ChartDataPoint {
-  date: string;
-  score: number;
-  mood_tag: string;
-}
+export const INSTRUMENT_LABELS: Record<InstrumentType, string> = {
+  soft_piano: '柔和钢琴',
+  acoustic_guitar: '原声吉他',
+  pad: '铺底音色',
+  orchestral: '管弦乐',
+  lofi_beats: 'LoFi节拍',
+  synth: '合成器',
+  full_band: '全乐队',
+  electronic: '电子乐',
+  piano_with_pad: '钢琴+铺底',
+  piano_with_strings: '钢琴+弦乐',
+  electronic_beat: '电子节拍',
+};
 
-export interface MoodOption {
-  label: string;
-  value: string;
-  color: string;
-}
-
-export const MOOD_OPTIONS: MoodOption[] = [
-  { label: '忧伤', value: 'sad', color: '#6B7DB3' },
-  { label: '思念', value: 'nostalgic', color: '#C8A882' },
-  { label: '治愈', value: 'healing', color: '#5DB5A4' },
-  { label: '希望', value: 'hopeful', color: '#F0C060' },
-  { label: '平静', value: 'calm', color: '#7EC8A0' },
-  { label: '温暖', value: 'warm', color: '#E8916A' },
-  { label: '孤独', value: 'lonely', color: '#9B8EC4' },
-  { label: '苦涩', value: 'bittersweet', color: '#C4828C' },
-];
-
-export const INSTRUMENTS = [
-  { label: '钢琴', value: 'piano', icon: '🎹' },
-  { label: '吉他', value: 'guitar', icon: '🎸' },
-  { label: '弦乐', value: 'strings', icon: '🎻' },
-  { label: '音乐盒', value: 'music_box', icon: '🎵' },
-  { label: '暖垫', value: 'warm_pad', icon: '🎧' },
-];
+export const BEAT_PATTERN_LABELS: Record<BeatPattern, string> = {
+  simple_kick_snare: '简易底鼓军鼓',
+  energetic_beat: '活力节拍',
+  lofi_beat: 'LoFi节拍',
+  trap_hats: 'Trap踩镲',
+};

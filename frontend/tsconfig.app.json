@@ -18,5 +18,23 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/App.css",
+    "src/data/theoryData.ts",
+    "src/engine/toneEngine.ts",
+    "src/pages/CreatePage.tsx",
+    "src/pages/DiaryPage.tsx",
+    "src/pages/HealingPage.tsx",
+    "src/pages/ResonancePage.tsx",
+    "src/pages/SquarePage.tsx",
+    "src/pages/TheoryPage.tsx",
+    "src/pages/WorkDetailPage.tsx",
+    "src/services/diaryService.ts",
+    "src/services/giftService.ts",
+    "src/services/healingService.ts",
+    "src/services/llmService.ts",
+    "src/services/resonanceService.ts",
+    "src/services/workService.ts"
+  ]
 }

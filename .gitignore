@@ -23,3 +23,25 @@ Thumbs.db
 
 # 日志
 *.log
+
+# 视频帧缓存（用户要求不上传）
+reference_video_frames/
+
+# 后端临时文件
+backend/uploads/
+backend/exports/
+backend/generated/
+backend/musecut.db
+
+# 前端构建产物
+frontend/.next/
+frontend/.nuxt/
+frontend/.output/
+frontend/.cache/
+
+# 系统临时文件
+*.tmp
+*.temp
+*.swp
+*.swo
+*~

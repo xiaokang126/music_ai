@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { formatApiError, recordClientError } from './errorUtils';
 
 const api = axios.create({
   baseURL: '/api',
@@ -20,8 +21,14 @@ api.interceptors.response.use(
       localStorage.removeItem('token');
       localStorage.removeItem('user');
     }
+    const message = formatApiError(err, '接口请求失败', {
+      url: err.config?.url,
+      method: err.config?.method,
+    });
+    recordClientError('api.response', message, err);
     return Promise.reject(err);
   }
 );
 
+export { api };
 export default api;

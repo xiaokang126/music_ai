@@ -14,8 +14,8 @@ html {
 
 body {
   font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: linear-gradient(135deg, #FFFAF5 0%, #FFF3E0 50%, #FDF2E9 100%);
-  color: #3D3D3D;
+  background: #F7F3EC;
+  color: #24323D;
   min-height: 100vh;
 }
 
@@ -26,29 +26,33 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #F0C6C0;
+  background: #2F7D73;
   border-radius: 3px;
 }
 
 @layer components {
   .glass {
-    background: rgba(255, 255, 255, 0.65);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.82);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(36, 50, 61, 0.08);
+    box-shadow: 0 10px 28px rgba(36, 50, 61, 0.08);
   }
   .glass-strong {
-    background: rgba(255, 255, 255, 0.8);
+    background: rgba(247, 243, 236, 0.92);
     backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(36, 50, 61, 0.08);
   }
-  .gradient-warm {
-    background: linear-gradient(135deg, #E8916A 0%, #F0C6C0 50%, #FFF3E0 100%);
+  .gradient-primary {
+    background: linear-gradient(135deg, #24323D 0%, #2F7D73 58%, #C95F4F 100%);
+  }
+  .gradient-accent {
+    background: linear-gradient(135deg, #C95F4F 0%, #EF8A5B 100%);
   }
   .card-hover {
     transition: all 0.3s ease;
   }
   .card-hover:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 12px 40px rgba(232, 145, 106, 0.15);
+    transform: translateY(-3px);
+    box-shadow: 0 12px 34px rgba(36, 50, 61, 0.14);
   }
 }

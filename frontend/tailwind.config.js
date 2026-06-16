@@ -8,32 +8,37 @@ export default {
     extend: {
       colors: {
         primary: {
-          DEFAULT: '#E8916A',
-          light: '#F0C6C0',
-          pale: '#FFF3E0',
+          DEFAULT: '#2F7D73',
+          light: '#6FB7A8',
+          pale: '#DDEFEA',
+          dark: '#20564F',
+        },
+        accent: {
+          DEFAULT: '#C95F4F',
+          light: '#EF8A5B',
+          pale: '#F7DED6',
         },
         surface: {
-          bg: '#FFFAF5',
+          bg: '#F7F3EC',
           card: '#FFFFFF',
-          glass: 'rgba(255,255,255,0.7)',
-          warm: '#FDF2E9',
+          glass: 'rgba(255,255,255,0.75)',
+          warm: '#EFE6D8',
+          dark: '#24323D',
         },
         text: {
-          main: '#3D3D3D',
-          secondary: '#8C8C8C',
-          muted: '#BFBFBF',
+          main: '#24323D',
+          secondary: '#5D6972',
+          muted: '#8A918F',
         },
         mood: {
           sad: '#6B7DB3',
-          melancholic: '#8B7EC8',
-          hopeful: '#F0C060',
           warm: '#E8916A',
           calm: '#7EC8A0',
-          healing: '#5DB5A4',
-          lonely: '#9B8EC4',
+          happy: '#F0C060',
+          intense: '#C44D4D',
           nostalgic: '#C8A882',
-          bittersweet: '#C4828C',
-          peaceful: '#82B9C8',
+          mysterious: '#8B5CF6',
+          energetic: '#06B6D4',
         }
       },
       fontFamily: {
