@@ -28,6 +28,7 @@ Thumbs.db
 # 视频帧缓存（用户要求不上传）
 docs/
 reference_video_frames/
+scripts/
 
 # 后端临时文件
 backend/uploads/
