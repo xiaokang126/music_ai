@@ -15,6 +15,7 @@ from ..schemas.timeline_schema import (
     TimelineResponse,
 )
 from ..services.llm_service import generate_timeline as llm_generate
+from ..services.profile_builder import build_profile_for_project
 
 router = APIRouter(prefix="/api/timeline", tags=["timeline"])
 logger = logging.getLogger("musecut.timeline")
@@ -42,14 +43,7 @@ async def generate(body: TimelineGenerateRequest, user: User = Depends(get_curre
     stage = "build_profile"
     try:
         if not project.video_profile:
-            # Auto-build profile if missing
-            from ..services.video_analyzer import detect_scene_changes
-            from ..services.video_profile import build_video_profile
-            sc = detect_scene_changes(project.video_path)
-            kp = json.loads(project.key_points_json) if project.key_points_json else []
-            vr = json.loads(project.voice_regions_json) if project.voice_regions_json else []
-            ce = json.loads(project.caption_events_json) if project.caption_events_json else []
-            profile = build_video_profile(project, sc, kp, vr, ce)
+            profile = build_profile_for_project(project)
             project.video_profile = json.dumps(profile, ensure_ascii=False)
             project.status = "profiled"
             db.commit()

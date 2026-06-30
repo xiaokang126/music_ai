@@ -5,17 +5,22 @@ import api from '../lib/api';
 import WorkflowGuide from '../components/project/WorkflowGuide';
 import { formatApiError, recordClientError } from '../lib/errorUtils';
 import { audioEngine } from '../engine/musecutEngine';
+import { browserVideoVolume, normalizeMixSettings, sliderFill, sliderToDb, type MixSettingKey } from '../lib/mixSettings';
 
 export default function PreviewPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const waveformRef = useRef<HTMLCanvasElement>(null);
+  const saveTimerRef = useRef<number>(0);
+  const syncedPlaybackRef = useRef(false);
+  const [timelineId, setTimelineId] = useState('');
   const [timelineData, setTimelineData] = useState<any>(null);
   const [playing, setPlaying] = useState(false);
-  const [bgmVol, setBgmVol] = useState(80);
-  const [beatVol, setBeatVol] = useState(70);
-  const [sfxVol, setSfxVol] = useState(70);
+  const [originalVol, setOriginalVol] = useState(100);
+  const [bgmVol, setBgmVol] = useState(90);
+  const [beatVol, setBeatVol] = useState(18);
+  const [sfxVol, setSfxVol] = useState(15);
   const [masterVol, setMasterVol] = useState(90);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -28,12 +33,58 @@ export default function PreviewPage() {
   const pollRef = useRef<number>(0);
   const autoBGMRef = useRef(false);
 
+  const applyMixState = (data: any) => {
+    const mix = normalizeMixSettings(data?.mix_settings);
+    if (data) data.mix_settings = mix;
+    setOriginalVol(mix.original_volume);
+    setBgmVol(mix.bgm_volume);
+    setBeatVol(mix.beat_volume);
+    setSfxVol(mix.sfx_volume);
+    setMasterVol(mix.master_volume);
+  };
+
+  const setLocalMixValue = (field: MixSettingKey, value: number) => {
+    if (field === 'original_volume') setOriginalVol(value);
+    if (field === 'bgm_volume') setBgmVol(value);
+    if (field === 'beat_volume') setBeatVol(value);
+    if (field === 'sfx_volume') setSfxVol(value);
+    if (field === 'master_volume') setMasterVol(value);
+  };
+
+  const scheduleTimelineSave = useCallback((next: any) => {
+    if (!timelineId) return;
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      api.put(`/timeline/${timelineId}`, { timeline_json: JSON.stringify(next) })
+        .catch((e) => {
+          const message = formatApiError(e, '保存混音设置失败', { action: 'preview_save_mix_settings', projectId, timelineId });
+          recordClientError('preview.save_mix_settings', message, e);
+          setError(message);
+        });
+    }, 800);
+  }, [projectId, timelineId]);
+
+  const updateMixSetting = (field: MixSettingKey, value: number) => {
+    const mix = normalizeMixSettings({ ...(timelineData?.mix_settings || {}), [field]: value });
+    setLocalMixValue(field, mix[field]);
+    if (!timelineData) return;
+    const next = { ...timelineData, mix_settings: mix };
+    setTimelineData(next);
+    scheduleTimelineSave(next);
+  };
+
   useEffect(() => {
     if (!projectId) return;
     setError('');
     setCheckedBGM(false);
     api.get(`/timeline/by-project/${projectId}`)
-      .then(r => { setTimelineData(JSON.parse(r.data.timeline_json)); setLoading(false); })
+      .then(r => {
+        setTimelineId(r.data.id);
+        const parsed = JSON.parse(r.data.timeline_json);
+        applyMixState(parsed);
+        setTimelineData(parsed);
+        setLoading(false);
+      })
       .catch((e) => {
         const message = formatApiError(e, '加载 Timeline 失败，请确认已在编辑页生成配乐方案', { action: 'load_timeline_for_preview', projectId });
         recordClientError('preview.load_timeline', message, e);
@@ -93,19 +144,35 @@ export default function PreviewPage() {
   }, [timelineData, hasBGM, projectId, userSFXs]);
 
   useEffect(() => { if (timelineData && engineReady) audioEngine.scheduleTimeline(timelineData); }, [timelineData, engineReady]);
-  useEffect(() => { if (engineReady) audioEngine.bgmVolume.volume.value = (bgmVol / 100) * 2 - 1; }, [bgmVol, engineReady]);
-  useEffect(() => { if (engineReady) audioEngine.beatVolume.volume.value = (beatVol / 100) * 2 - 1; }, [beatVol, engineReady]);
-  useEffect(() => { if (engineReady) audioEngine.sfxVolume.volume.value = (sfxVol / 100) * 2 - 1; }, [sfxVol, engineReady]);
-  useEffect(() => { if (engineReady) audioEngine.masterVolume.volume.value = (masterVol / 100) * 2 - 1; }, [masterVol, engineReady]);
+  useEffect(() => { if (engineReady) audioEngine.setBgmVolumeDb(sliderToDb(bgmVol)); }, [bgmVol, engineReady]);
+  useEffect(() => { if (engineReady) audioEngine.beatVolume.volume.value = sliderToDb(beatVol); }, [beatVol, engineReady]);
+  useEffect(() => { if (engineReady) audioEngine.sfxVolume.volume.value = sliderToDb(sfxVol); }, [sfxVol, engineReady]);
+  useEffect(() => { if (engineReady) audioEngine.masterVolume.volume.value = sliderToDb(masterVol); }, [masterVol, engineReady]);
+  useEffect(() => { if (videoRef.current) videoRef.current.volume = browserVideoVolume(originalVol); }, [originalVol]);
 
   const togglePlay = async () => {
     if (!engineReady) { await handleInitEngine(); return; }
     const v = videoRef.current; if (!v) return;
-    playing ? (audioEngine.stop(), v.pause()) : (v.play(), await audioEngine.play(v.currentTime || 0));
+    if (playing) {
+      syncedPlaybackRef.current = false;
+      audioEngine.stop();
+      v.pause();
+    } else {
+      audioEngine.stop(false);
+      v.volume = browserVideoVolume(originalVol);
+      await v.play();
+      await audioEngine.play(v.currentTime || 0);
+      syncedPlaybackRef.current = true;
+    }
     setPlaying(!playing);
   };
 
-  const handleStop = () => { audioEngine.stop(); videoRef.current?.pause(); setPlaying(false); };
+  const handleStop = () => {
+    syncedPlaybackRef.current = false;
+    audioEngine.stop();
+    videoRef.current?.pause();
+    setPlaying(false);
+  };
 
   const handleGenerateBGM = async () => {
     if (!projectId) return;
@@ -143,6 +210,40 @@ export default function PreviewPage() {
     autoBGMRef.current = true;
     handleGenerateBGM();
   }, [projectId, timelineData, checkedBGM, hasBGM, generatingBGM]);
+
+  useEffect(() => () => {
+    window.clearInterval(pollRef.current);
+    window.clearTimeout(saveTimerRef.current);
+    audioEngine.stop();
+  }, []);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const stopSyncedAudio = (reset = false) => {
+      syncedPlaybackRef.current = false;
+      audioEngine.stop(reset);
+      setPlaying(false);
+    };
+    const pause = () => stopSyncedAudio(false);
+    const end = () => stopSyncedAudio(true);
+    const wait = () => {
+      if (syncedPlaybackRef.current && !v.paused && !v.ended) stopSyncedAudio(false);
+    };
+    const seek = () => {
+      if (syncedPlaybackRef.current) stopSyncedAudio(false);
+    };
+    v.addEventListener('pause', pause);
+    v.addEventListener('ended', end);
+    v.addEventListener('waiting', wait);
+    v.addEventListener('seeking', seek);
+    return () => {
+      v.removeEventListener('pause', pause);
+      v.removeEventListener('ended', end);
+      v.removeEventListener('waiting', wait);
+      v.removeEventListener('seeking', seek);
+    };
+  }, [projectId, timelineData]);
 
   if (loading) return <div className="flex justify-center py-20"><Loader2 className="animate-spin text-primary" size={32} /></div>;
   if (!timelineData) return <div className="text-center py-20"><p className="text-text-muted text-lg mb-4">请先在编辑页生成 Music Timeline</p><button onClick={() => navigate(`/editor/${projectId}`)} className="px-6 py-3 rounded-xl gradient-primary text-white font-medium">前往编辑页</button></div>;
@@ -191,10 +292,27 @@ export default function PreviewPage() {
       <div className="glass rounded-2xl p-6">
         <h3 className="font-semibold text-text-main mb-5 flex items-center gap-2"><Volume2 size={18} /> 多轨混音</h3>
         <div className="space-y-4">
-          {[{ label: 'BGM 背景音乐', value: bgmVol, set: setBgmVol, color: '#6366F1' },{ label: 'Beat 节奏', value: beatVol, set: setBeatVol, color: '#f97316' },{ label: 'SFX 音效', value: sfxVol, set: setSfxVol, color: '#ef4444' }].map(({ label, value, set, color }) => (
-            <div key={label} className="flex items-center gap-4"><span className="w-32 text-sm text-text-secondary">{label}</span><input type="range" min="0" max="100" value={value} onChange={e => set(Number(e.target.value))} className="flex-1 h-2 rounded-full appearance-none cursor-pointer" style={{ background: `linear-gradient(to right, ${color} ${value}%, #e5e7eb ${value}%)` }} /><span className="w-10 text-sm text-text-main text-right">{value}%</span></div>
+          {[
+            { label: '原视频原声', field: 'original_volume' as MixSettingKey, value: originalVol, max: 200, color: '#0f766e' },
+            { label: 'BGM 完整配乐', field: 'bgm_volume' as MixSettingKey, value: bgmVol, max: 200, color: '#6366F1' },
+            { label: 'Beat 轻微点缀', field: 'beat_volume' as MixSettingKey, value: beatVol, max: 120, color: '#f97316' },
+            { label: 'SFX 轻微点缀', field: 'sfx_volume' as MixSettingKey, value: sfxVol, max: 120, color: '#ef4444' },
+            { label: '总音量 Master', field: 'master_volume' as MixSettingKey, value: masterVol, max: 140, color: '#1e293b' },
+          ].map(({ label, field, value, max, color }) => (
+            <div key={label} className="flex items-center gap-4">
+              <span className="w-32 text-sm text-text-secondary">{label}</span>
+              <input
+                type="range"
+                min="0"
+                max={max}
+                value={value}
+                onChange={e => updateMixSetting(field, Number(e.target.value))}
+                className="flex-1 h-2 rounded-full appearance-none cursor-pointer"
+                style={{ background: `linear-gradient(to right, ${color} ${sliderFill(value, max)}%, #e5e7eb ${sliderFill(value, max)}%)` }}
+              />
+              <span className="w-12 text-sm text-text-main text-right">{value}%</span>
+            </div>
           ))}
-          <div className="flex items-center gap-4 pt-2 border-t border-surface-warm"><span className="w-32 text-sm font-medium text-text-main">总音量 Master</span><input type="range" min="0" max="100" value={masterVol} onChange={e => setMasterVol(Number(e.target.value))} className="flex-1 h-2 rounded-full appearance-none cursor-pointer" style={{ background: `linear-gradient(to right, #1e293b ${masterVol}%, #e5e7eb ${masterVol}%)` }} /><span className="w-10 text-sm text-text-main text-right">{masterVol}%</span></div>
         </div>
       </div>
 

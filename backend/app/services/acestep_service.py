@@ -15,6 +15,9 @@ class AceStepError(RuntimeError):
 
 
 logger = logging.getLogger("musecut.acestep")
+ACE_MAX_REQUEST_SECONDS = float(os.getenv("ACE_MAX_REQUEST_SECONDS", "60"))
+ACE_INFERENCE_STEPS = int(os.getenv("ACE_INFERENCE_STEPS", "12"))
+ACE_MAX_MOVEMENTS = int(os.getenv("ACE_MAX_MOVEMENTS", "12"))
 
 
 def _ace_error(message: str) -> AceStepError:
@@ -237,6 +240,115 @@ def _production_prompt_for_segment(timeline_data: dict, seg: dict) -> str:
     return f"{caption}. {suffix}"
 
 
+def _production_prompt_for_full_score(timeline_data: dict, target_duration: float | None = None) -> str:
+    style = str(timeline_data.get("style") or "short video soundtrack").replace("_", " ")
+    bpm = timeline_data.get("bpm", 90)
+    key = str(timeline_data.get("key") or "C_major").replace("_", " ")
+    global_caption = str(timeline_data.get("global_caption") or "").strip()
+    segments = timeline_data.get("timeline", []) or []
+    arc_parts = []
+    for seg in segments:
+        start = seg.get("start", 0)
+        end = seg.get("end", 0)
+        emotion = seg.get("emotion", "warm")
+        energy = seg.get("energy", 0.5)
+        instrument = seg.get("instrument", "main theme")
+        arc_parts.append(f"{start}-{end}s {emotion} energy {energy} led by {instrument}")
+    arc = "; ".join(arc_parts[:5])
+    base = global_caption or (
+        f"Create one continuous polished instrumental {style} score in {key}, around {bpm} BPM."
+    )
+    duration_text = f" The target video is {target_duration:.1f} seconds long;" if target_duration else ""
+    return (
+        f"{base}{duration_text} create a production-ready main cue that can sustain the full edit. "
+        f"Full-video emotional arc: {arc}. "
+        "Make it feel like one coherent soundtrack cue with a memorable main motif, natural intro, development and ending. "
+        "Avoid a static drum loop: evolve the arrangement every 8-16 bars with tasteful changes in percussion, bass motion, harmony, melody, texture and density. "
+        "The percussion must support the story instead of becoming the only distinctive element. "
+        "Use loop-friendly phrasing only inside each movement, but preserve clear musical development across the full video. "
+        "Keep internal timeline transitions continuous: no fade-out or fade-in at segment boundaries, no volume pumping between sections, consistent loudness across the full cue. "
+        "Do not create a collage of stingers, risers, impacts or random sound effects. "
+        "No vocals, no lyrics, dialogue-friendly mix, smooth dynamics, warm publish-ready short-video score."
+    )
+
+
+def _segments_for_window(timeline_data: dict, start: float, end: float) -> list[dict]:
+    selected = []
+    for seg in timeline_data.get("timeline", []) or []:
+        try:
+            seg_start = float(seg.get("start", 0) or 0)
+            seg_end = float(seg.get("end", seg_start) or seg_start)
+        except (TypeError, ValueError):
+            continue
+        if max(start, seg_start) < min(end, seg_end):
+            selected.append(seg)
+    return selected
+
+
+def _movement_plan(target_duration: float) -> list[tuple[float, float]]:
+    if target_duration <= ACE_MAX_REQUEST_SECONDS + 1:
+        return [(0.0, target_duration)]
+    target_chunk = max(25.0, min(ACE_MAX_REQUEST_SECONDS, 60.0))
+    count = max(2, int((target_duration + target_chunk - 1) // target_chunk))
+    count = min(max(2, ACE_MAX_MOVEMENTS), count)
+    step = target_duration / count
+    plan = []
+    for idx in range(count):
+        start = round(step * idx, 2)
+        end = round(target_duration if idx == count - 1 else step * (idx + 1), 2)
+        plan.append((start, end))
+    return plan
+
+
+def _segment_arc_text(segments: list[dict], limit: int = 6) -> str:
+    parts = []
+    for seg in segments[:limit]:
+        parts.append(
+            f"{seg.get('start', 0)}-{seg.get('end', 0)}s "
+            f"{seg.get('emotion', 'warm')} energy {seg.get('energy', 0.5)} "
+            f"led by {seg.get('instrument', 'main motif')}"
+        )
+    return "; ".join(parts)
+
+
+def _production_prompt_for_movement(
+    timeline_data: dict,
+    *,
+    movement_index: int,
+    movement_total: int,
+    start: float,
+    end: float,
+    target_duration: float,
+) -> str:
+    style = str(timeline_data.get("style") or "short video soundtrack").replace("_", " ")
+    bpm = timeline_data.get("bpm", 90)
+    key = str(timeline_data.get("key") or "C_major").replace("_", " ")
+    global_caption = str(timeline_data.get("global_caption") or "").strip()
+    semantic = timeline_data.get("semantic_understanding") if isinstance(timeline_data.get("semantic_understanding"), dict) else {}
+    story = str(semantic.get("story_summary") or "").strip()
+    director = str(semantic.get("music_director_brief") or "").strip()
+    local_segments = _segments_for_window(timeline_data, start, end)
+    local_arc = _segment_arc_text(local_segments) or "smooth emotional development with subtle dynamic motion"
+
+    movement_role = "opening with a clear hook" if movement_index == 1 else (
+        "final resolution with a natural ending" if movement_index == movement_total else "middle development with evolving layers"
+    )
+    continuity = "connect naturally from the previous movement" if movement_index > 1 else "establish the main motif"
+    next_hint = "leave musical space for the next movement" if movement_index < movement_total else "finish with a resolved tail"
+
+    return (
+        f"{global_caption or f'Create a polished instrumental {style} score'} "
+        f"This is movement {movement_index} of {movement_total}, covering video time {start:.1f}-{end:.1f}s "
+        f"inside a {target_duration:.1f}s full video. Role: {movement_role}; {continuity}; {next_hint}. "
+        f"Style {style}, key {key}, around {bpm} BPM. Local visual/emotional arc: {local_arc}. "
+        f"Story context: {story or 'short-video emotional storytelling'}. Director intent: {director or 'match the video dynamics without overpowering original audio'}. "
+        "Compose a real evolving background score, not a single distinctive drum loop. "
+        "Vary drums, bass, harmony, motif, register, texture and density over time; add or remove layers every 8-16 bars while keeping the same musical identity. "
+        "Percussion should be restrained and supportive, with melodic or harmonic material carrying the emotion. "
+        "No hard fade-in or fade-out, no stingers, no random sound effects, no vocals, no lyrics, dialogue-friendly mix, stable loudness, publish-ready."
+    )
+
+
 def _timeline_duration_ms(timeline_data: dict) -> int:
     duration = 0.0
     try:
@@ -260,13 +372,16 @@ def _segment_duration_seconds(seg: dict) -> float:
     return max(1.0, end - start)
 
 
-def _fit_audio_to_duration(audio: AudioSegment, target_ms: int) -> AudioSegment:
+def _fit_audio_to_duration(audio: AudioSegment, target_ms: int, fade_out_ms: int = 350) -> AudioSegment:
     target_ms = max(1000, int(target_ms))
     audio = audio.set_channels(2)
     if len(audio) == 0:
         return AudioSegment.silent(duration=target_ms).set_channels(2)
     if len(audio) >= target_ms:
-        return audio[:target_ms].fade_out(min(350, target_ms // 4))
+        trimmed = audio[:target_ms]
+        if fade_out_ms > 0:
+            trimmed = trimmed.fade_out(min(fade_out_ms, target_ms // 4))
+        return trimmed
 
     result = audio
     while len(result) < target_ms:
@@ -275,30 +390,42 @@ def _fit_audio_to_duration(audio: AudioSegment, target_ms: int) -> AudioSegment:
             result = result.append(audio, crossfade=crossfade)
         else:
             result += audio
-    return result[:target_ms].fade_out(min(350, target_ms // 4))
+    result = result[:target_ms]
+    if fade_out_ms > 0:
+        result = result.fade_out(min(fade_out_ms, target_ms // 4))
+    return result
 
 
-def _normalize_ace_segment(input_path: str, output_path: str, target_seconds: float) -> str:
+def _normalize_ace_segment(input_path: str, output_path: str, target_seconds: float, fade_out_ms: int = 350) -> str:
     target_ms = max(1000, int(target_seconds * 1000))
     audio = AudioSegment.from_file(input_path).set_channels(2)
-    fitted = _fit_audio_to_duration(audio, target_ms)
+    fitted = _fit_audio_to_duration(audio, target_ms, fade_out_ms=fade_out_ms)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fitted.export(output_path, format="mp3", bitrate="320k")
     return output_path
 
 
-def _concat_fitted_segments(segment_paths: list[str], output_path: str, target_ms: int) -> str:
+def _concat_fitted_segments(segment_paths: list[str], output_path: str, target_ms: int, crossfade_ms: int = 0) -> str:
     combined = AudioSegment.silent(duration=0).set_channels(2)
     for path in segment_paths:
-        combined += AudioSegment.from_file(path).set_channels(2)
-    combined = _fit_audio_to_duration(combined, target_ms)
+        chunk = AudioSegment.from_file(path).set_channels(2)
+        if len(combined) and crossfade_ms > 0:
+            combined = combined.append(chunk, crossfade=min(crossfade_ms, len(combined) // 4, len(chunk) // 4))
+        else:
+            combined += chunk
+    combined = _fit_audio_to_duration(combined, target_ms, fade_out_ms=350)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     combined.export(output_path, format="mp3", bitrate="320k")
     return output_path
 
 
 async def generate_bgm_for_timeline(timeline_data: dict, project_id: str) -> dict:
-    """Generate BGM for each timeline segment using ACE-Step and concatenate."""
+    """Generate one coherent full-video BGM with ACE-Step.
+
+    The timeline remains useful for UI explanation and ducking, but BGM quality is
+    better when ACE receives one full-score brief instead of several unrelated
+    segment prompts that are later stitched together.
+    """
     os.makedirs(settings.GENERATED_DIR, exist_ok=True)
 
     timeline = timeline_data.get("timeline", [])
@@ -307,45 +434,70 @@ async def generate_bgm_for_timeline(timeline_data: dict, project_id: str) -> dic
     if not await ace_service_available():
         raise AceStepError(ace_unavailable_message())
 
-    segments_audio = []
-    for i, seg in enumerate(timeline):
-        caption = _production_prompt_for_segment(timeline_data, seg)
-        duration = _segment_duration_seconds(seg)
-
-        try:
-            task_id = await submit_ace_task(caption, duration)
-            result = await poll_ace_task(task_id)
-        except AceStepError as exc:
-            raise _ace_error(f"第 {i + 1} 段生成失败，{exc}") from exc
-
-        file_path = result.get("file", "")
-        if not file_path:
-            raise _ace_error(f"第 {i + 1} 段生成结果没有 file 字段，响应：{json.dumps(result, ensure_ascii=False)[:500]}")
-
-        raw_dest = os.path.join(settings.GENERATED_DIR, f"{project_id}_seg_{i}_raw.mp3")
-        fitted_dest = os.path.join(settings.GENERATED_DIR, f"{project_id}_seg_{i}.mp3")
-        await download_ace_audio(file_path, raw_dest)
-        _normalize_ace_segment(raw_dest, fitted_dest, duration)
-        segments_audio.append(fitted_dest)
-        logger.info("ACE segment generated project_id=%s segment=%s duration=%.2fs", project_id, i, duration)
-
+    target_ms = _timeline_duration_ms(timeline_data)
+    target_duration = max(1.0, target_ms / 1000)
     output_path = os.path.join(settings.GENERATED_DIR, f"{project_id}_bgm_full.mp3")
+    plan = _movement_plan(target_duration)
+    generated_paths: list[str] = []
+
     try:
-        _concat_fitted_segments(segments_audio, output_path, _timeline_duration_ms(timeline_data))
+        if len(plan) == 1:
+            request_duration = min(target_duration, max(8.0, ACE_MAX_REQUEST_SECONDS))
+            prompt = _production_prompt_for_full_score(timeline_data, target_duration=target_duration)
+            task_id = await submit_ace_task(prompt, request_duration, inference_steps=ACE_INFERENCE_STEPS)
+            result = await poll_ace_task(task_id, timeout=max(120.0, request_duration * 8))
+            file_path = result.get("file", "")
+            if not file_path:
+                raise _ace_error(f"完整配乐生成结果没有 file 字段，响应：{json.dumps(result, ensure_ascii=False)[:500]}")
+            raw_dest = os.path.join(settings.GENERATED_DIR, f"{project_id}_bgm_full_raw.mp3")
+            await download_ace_audio(file_path, raw_dest)
+            _normalize_ace_segment(raw_dest, output_path, target_duration)
+        else:
+            for idx, (start, end) in enumerate(plan, start=1):
+                movement_duration = max(4.0, end - start)
+                request_duration = min(movement_duration, max(8.0, ACE_MAX_REQUEST_SECONDS))
+                prompt = _production_prompt_for_movement(
+                    timeline_data,
+                    movement_index=idx,
+                    movement_total=len(plan),
+                    start=start,
+                    end=end,
+                    target_duration=target_duration,
+                )
+                task_id = await submit_ace_task(prompt, request_duration, inference_steps=ACE_INFERENCE_STEPS)
+                result = await poll_ace_task(task_id, timeout=max(120.0, request_duration * 8))
+                file_path = result.get("file", "")
+                if not file_path:
+                    raise _ace_error(
+                        f"第 {idx}/{len(plan)} 段配乐结果没有 file 字段，响应：{json.dumps(result, ensure_ascii=False)[:500]}"
+                    )
+                raw_dest = os.path.join(settings.GENERATED_DIR, f"{project_id}_movement_{idx:02d}_raw.mp3")
+                fitted_dest = os.path.join(settings.GENERATED_DIR, f"{project_id}_movement_{idx:02d}.mp3")
+                await download_ace_audio(file_path, raw_dest)
+                _normalize_ace_segment(raw_dest, fitted_dest, movement_duration, fade_out_ms=0)
+                generated_paths.append(fitted_dest)
+            _concat_fitted_segments(generated_paths, output_path, target_ms, crossfade_ms=1400)
+    except AceStepError as exc:
+        raise _ace_error(f"完整配乐生成失败，{exc}") from exc
     except Exception as exc:
-        raise _ace_error(f"拼接 ACE 音频片段失败：{exc}") from exc
+        raise _ace_error(f"处理完整配乐音频失败：{exc}") from exc
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        raise _ace_error("拼接完成后没有得到可用音频文件")
+        raise _ace_error("完整配乐生成后没有得到可用音频文件")
 
     final_ms = len(AudioSegment.from_file(output_path))
-    target_ms = _timeline_duration_ms(timeline_data)
     if final_ms + 250 < target_ms:
         raise _ace_error(f"ACE 音频长度不足，目标 {target_ms / 1000:.2f}s，实际 {final_ms / 1000:.2f}s")
+    logger.info(
+        "ACE full-score generated project_id=%s movements=%s target_duration=%.2fs",
+        project_id,
+        len(plan),
+        target_duration,
+    )
 
     return {
         "success": True,
         "audio_path": output_path,
-        "segment_count": len(segments_audio),
+        "segment_count": len(timeline),
         "total_segments": len(timeline),
     }

@@ -16,6 +16,7 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
+.codebuddy/
 
 # OS
 .DS_Store
@@ -25,6 +26,7 @@ Thumbs.db
 *.log
 
 # 视频帧缓存（用户要求不上传）
+docs/
 reference_video_frames/
 
 # 后端临时文件
@@ -45,3 +47,20 @@ frontend/.cache/
 *.swp
 *.swo
 *~
+
+# 大文件和子模块（不上传）
+ACE-Step-1.5/
+Qwen2.5-VL/
+models/Qwen2.5-VL-3B-Instruct/
+MuseCut_AI短视频配乐导演项目计划书(3)(1).pdf
+docs/SoulChord_MuseCut_long_preview.mp4
+
+# 大文件扩展名
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.pdf
+*.zip
+*.tar.gz
+*.rar

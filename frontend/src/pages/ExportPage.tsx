@@ -59,7 +59,7 @@ export default function ExportPage() {
     }
   };
 
-  const pollStatus = async (eid: string) => {
+  const pollStatus = async (eid: string, retryCount = 0) => {
     try {
       const r = await api.get(`/export/status/${eid}`);
       setStatus(r.data.status);
@@ -75,9 +75,15 @@ export default function ExportPage() {
         setError(`导出失败\n导出任务: ${eid}\n格式: ${selected}\n服务端状态: failed${r.data.message ? `\n服务端说明: ${r.data.message}` : ''}`);
         setExporting(false);
       } else {
-        setTimeout(() => pollStatus(eid), 2000);
+        setTimeout(() => pollStatus(eid, 0), 2000);
       }
     } catch (err: any) {
+      const retryable = (err?.code === 'ECONNABORTED' || err?.code === 'ERR_NETWORK' || !err?.response) && retryCount < 10;
+      if (retryable) {
+        setStatus(`导出仍在处理中，继续查询...(${retryCount + 1}/10)`);
+        setTimeout(() => pollStatus(eid, retryCount + 1), 3000);
+        return;
+      }
       const message = formatApiError(err, '导出状态查询或下载失败', { action: 'poll_or_download_export', projectId, exportId: eid, format: selected });
       recordClientError('export.poll_or_download', message, err);
       setError(message);

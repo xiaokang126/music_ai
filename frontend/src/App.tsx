@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import Layout from './components/layout/Layout';
 import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
@@ -12,11 +13,23 @@ import LearnPage from './pages/LearnPage';
 import LearnDetailPage from './pages/LearnDetailPage';
 import ProfilePage from './pages/ProfilePage';
 import { AuthProvider } from './hooks/useAuth';
+import { audioEngine } from './engine/musecutEngine';
+
+function RouteAudioGuard() {
+  const location = useLocation();
+
+  useEffect(() => {
+    audioEngine.stop(false);
+  }, [location.pathname]);
+
+  return null;
+}
 
 export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
+        <RouteAudioGuard />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<Layout />}>

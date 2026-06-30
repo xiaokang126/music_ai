@@ -1,8 +1,8 @@
 import os
 import json
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -20,9 +20,128 @@ from ..schemas.video_schema import (
     VideoProjectListResponse,
 )
 from ..services.video_analyzer import extract_metadata, detect_scene_changes
-from ..services.video_profile import build_video_profile
+from ..services.profile_builder import build_profile_for_project, loads_json
 
 router = APIRouter(prefix="/api/video", tags=["video"])
+
+
+def _profile_duration(profile: dict) -> float:
+    metadata = profile.get("metadata") or {}
+    try:
+        return max(1.0, float(metadata.get("duration") or profile.get("duration") or 3.0))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _text_music_intent(text: str) -> tuple[str, float]:
+    compact = text.lower()
+    keyword_sets = [
+        (("燃", "高能", "热血", "兴奋", "冲刺", "快节奏", "节奏强", "运动"), ("energetic", 0.76)),
+        (("紧张", "冲突", "压迫", "危险", "严肃", "强烈"), ("intense", 0.72)),
+        (("开心", "快乐", "明亮", "轻快", "可爱", "活泼"), ("happy", 0.62)),
+        (("悲伤", "难过", "失落", "遗憾", "告别", "想念"), ("sad", 0.5)),
+        (("怀旧", "回忆", "毕业", "校园", "朋友", "青春"), ("nostalgic", 0.55)),
+        (("神秘", "悬疑", "夜晚", "未知"), ("mysterious", 0.55)),
+        (("温暖", "温柔", "治愈", "陪伴", "家庭"), ("warm", 0.5)),
+        (("平静", "安静", "克制", "舒缓", "柔和"), ("calm", 0.38)),
+    ]
+    for keywords, result in keyword_sets:
+        if any(word in compact for word in keywords):
+            return result
+    return "warm", 0.48
+
+
+def _rebuild_arc_from_semantic_text(profile: dict, semantic: dict) -> list[dict]:
+    duration = _profile_duration(profile)
+    current_arc = semantic.get("emotional_arc") if isinstance(semantic.get("emotional_arc"), list) else []
+    base_text = f"{semantic.get('story_summary', '')} {semantic.get('music_director_brief', '')}"
+    emotion, base_energy = _text_music_intent(base_text)
+    compact = base_text.lower()
+    wants_lift = any(word in compact for word in ("结尾抬起", "结尾提升", "最后抬起", "收束", "升起", "推高", "高潮"))
+    wants_restrained = any(word in compact for word in ("克制", "不要抢", "轻轻", "柔和", "低密度", "人声"))
+
+    if len(current_arc) >= 3:
+        boundaries = [float(current_arc[0].get("start", 0) or 0)]
+        for item in current_arc[:3]:
+            try:
+                boundaries.append(float(item.get("end") or duration))
+            except (TypeError, ValueError):
+                boundaries.append(duration)
+        boundaries[0] = 0.0
+        boundaries[-1] = duration
+    else:
+        boundaries = [0.0, round(duration / 3, 2), round(duration * 2 / 3, 2), duration]
+
+    arc: list[dict] = []
+    for idx in range(3):
+        item = current_arc[idx] if idx < len(current_arc) and isinstance(current_arc[idx], dict) else {}
+        seg_energy = base_energy
+        seg_emotion = emotion
+        if idx == 0 and wants_restrained:
+            seg_energy = min(seg_energy, 0.38)
+            seg_emotion = "calm" if emotion in {"warm", "nostalgic", "happy"} else emotion
+        if idx == 1:
+            seg_energy = min(0.82, seg_energy + 0.08)
+        if idx == 2 and wants_lift:
+            seg_energy = min(0.86, max(seg_energy + 0.16, 0.58))
+            if seg_emotion in {"calm", "sad"}:
+                seg_emotion = "warm"
+        elif idx == 2:
+            seg_energy = max(0.32, seg_energy - 0.05)
+
+        arc.append({
+            "start": round(max(0.0, boundaries[idx]), 2),
+            "end": round(max(boundaries[idx] + 0.2, min(duration, boundaries[idx + 1])), 2),
+            "visual": item.get("visual") or f"用户修正理解后的第 {idx + 1} 段",
+            "emotion": seg_emotion,
+            "energy": round(seg_energy, 2),
+            "music_intent": (
+                semantic.get("music_director_brief")
+                or item.get("music_intent")
+                or "根据用户修正后的故事理解重新组织完整连续配乐。"
+            ),
+        })
+    arc[-1]["end"] = round(duration, 2)
+    return arc
+
+
+def _video_file_response(path: str, request: Request, media_type: str = "video/mp4"):
+    size = os.path.getsize(path)
+    headers = {"Accept-Ranges": "bytes"}
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(path, media_type=media_type, headers=headers)
+
+    try:
+        unit, raw_range = range_header.split("=", 1)
+        if unit.strip().lower() != "bytes":
+            raise ValueError("unsupported range unit")
+        start_s, end_s = raw_range.split("-", 1)
+        if start_s:
+            start = int(start_s)
+            end = int(end_s) if end_s else size - 1
+        else:
+            suffix = int(end_s)
+            start = max(0, size - suffix)
+            end = size - 1
+        start = max(0, min(start, size - 1))
+        end = max(start, min(end, size - 1))
+    except Exception:
+        raise HTTPException(status_code=416, detail="Invalid range request")
+
+    headers.update({
+        "Content-Range": f"bytes {start}-{end}/{size}",
+        "Content-Length": str(end - start + 1),
+    })
+    with open(path, "rb") as f:
+        f.seek(start)
+        content = f.read(end - start + 1)
+    return Response(
+        content=content,
+        status_code=206,
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 @router.post("/upload", response_model=VideoProjectResponse)
@@ -30,6 +149,7 @@ async def upload(
     video: UploadFile = File(...),
     video_type: str = Form("campus_memory"),
     user_description: str = Form(""),
+    enable_ocr: bool = Form(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -57,6 +177,10 @@ async def upload(
 
     # Extract metadata
     metadata = await extract_metadata(filepath)
+    metadata["semantic_options"] = {
+        "mode": "balanced",
+        "ocr_enabled": bool(enable_ocr),
+    }
 
     project = VideoProject(
         id=file_id,
@@ -111,22 +235,20 @@ async def get_project(project_id: str, current_user: User = Depends(get_current_
 
 
 @router.get("/{project_id}/preview")
-async def preview_video(project_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def preview_video(project_id: str, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p = db.query(VideoProject).filter(VideoProject.id == project_id).first()
     if not p or not os.path.exists(p.video_path):
         raise HTTPException(status_code=404, detail="视频不存在")
-    with open(p.video_path, "rb") as f:
-        return Response(content=f.read(), media_type="video/mp4")
+    return _video_file_response(p.video_path, request)
 
 
 @router.get("/public/{project_id}/preview")
-async def public_preview_video(project_id: str, db: Session = Depends(get_db)):
+async def public_preview_video(project_id: str, request: Request, db: Session = Depends(get_db)):
     """Public video preview - no auth required, for community embedding."""
     p = db.query(VideoProject).filter(VideoProject.id == project_id).first()
     if not p or not os.path.exists(p.video_path):
         raise HTTPException(status_code=404, detail="视频不存在")
-    with open(p.video_path, "rb") as f:
-        return Response(content=f.read(), media_type="video/mp4")
+    return _video_file_response(p.video_path, request)
 
 
 @router.get("/{project_id}/scene-changes")
@@ -147,13 +269,48 @@ async def get_profile(project_id: str, current_user: User = Depends(get_current_
     if p.video_profile:
         return json.loads(p.video_profile)
 
-    # Detect scenes and build profile
-    scene_changes = detect_scene_changes(p.video_path)
-    key_points = json.loads(p.key_points_json) if p.key_points_json else []
-    voice_regions = json.loads(p.voice_regions_json) if p.voice_regions_json else []
-    caption_events = json.loads(p.caption_events_json) if p.caption_events_json else []
+    profile = build_profile_for_project(p)
+    p.video_profile = json.dumps(profile, ensure_ascii=False)
+    p.status = "profiled"
+    db.commit()
+    return profile
 
-    profile = build_video_profile(p, scene_changes, key_points, voice_regions, caption_events)
+
+@router.put("/{project_id}/semantic")
+async def update_semantic_profile(
+    project_id: str,
+    body: dict = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    p = db.query(VideoProject).filter(VideoProject.id == project_id, VideoProject.user_id == current_user.id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    profile = loads_json(p.video_profile, None) if p.video_profile else None
+    if not isinstance(profile, dict):
+        profile = build_profile_for_project(p)
+
+    semantic = profile.get("semantic_understanding") or {}
+    text_changed = False
+    if "story_summary" in body:
+        semantic["story_summary"] = str(body.get("story_summary") or "").strip()
+        text_changed = True
+    if "music_director_brief" in body:
+        semantic["music_director_brief"] = str(body.get("music_director_brief") or "").strip()
+        text_changed = True
+    if isinstance(body.get("emotional_arc"), list):
+        semantic["emotional_arc"] = body["emotional_arc"]
+    if isinstance(body.get("caption_texts"), list):
+        semantic["caption_texts"] = body["caption_texts"]
+    elif text_changed:
+        semantic["emotional_arc"] = _rebuild_arc_from_semantic_text(profile, semantic)
+    semantic["user_edited"] = True
+    semantic["revision"] = int(semantic.get("revision") or 0) + 1
+
+    profile["semantic_understanding"] = semantic
+    profile["story_summary"] = semantic.get("story_summary", "")
+    profile["semantic_arc"] = semantic.get("emotional_arc", [])
     p.video_profile = json.dumps(profile, ensure_ascii=False)
     p.status = "profiled"
     db.commit()
@@ -174,6 +331,7 @@ async def save_keypoints(
     p.key_points_json = json.dumps([kp.model_dump() for kp in body.keypoints], ensure_ascii=False)
     p.voice_regions_json = json.dumps([vr.model_dump() for vr in body.voice_regions], ensure_ascii=False)
     p.caption_events_json = json.dumps([ce.model_dump() for ce in body.caption_events], ensure_ascii=False)
+    p.video_profile = None
     db.commit()
     return {"success": True, "count": len(body.keypoints)}
 

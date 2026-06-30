@@ -1,8 +1,9 @@
 import os
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
@@ -22,11 +23,11 @@ from ..services.exporter import render_mixed_audio, render_video_with_mixed_audi
 router = APIRouter(prefix="/api/export", tags=["export"])
 logger = logging.getLogger("musecut.export")
 optional_bearer = HTTPBearer(auto_error=False)
+export_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="musecut-export")
 
 
 @router.post("/audio")
-async def export_audio(body: dict, background_tasks: BackgroundTasks,
-                 current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def export_audio(body: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     project_id = body.get("project_id")
     fmt = body.get("format", "mp4")
     if fmt not in ("mp4", "wav", "flac", "mp3", "json"):
@@ -43,7 +44,7 @@ async def export_audio(body: dict, background_tasks: BackgroundTasks,
     db.add(task)
     db.commit()
     db.refresh(task)
-    background_tasks.add_task(_do_export, task.id, project_id, fmt)
+    export_executor.submit(_do_export, task.id, project_id, fmt)
     return {"export_id": task.id, "status": "processing"}
 
 
@@ -142,7 +143,7 @@ async def download_export(
     return _download_response(task)
 
 
-async def _do_export(export_id: str, project_id: str, fmt: str):
+def _do_export(export_id: str, project_id: str, fmt: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:

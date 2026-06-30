@@ -6,6 +6,7 @@ import WorkflowGuide from '../components/project/WorkflowGuide';
 import { formatApiError, recordClientError } from '../lib/errorUtils';
 import { VIDEO_TYPE_LABELS, EMOTION_LABELS, type VideoType, type EmotionType } from '../types';
 import { audioEngine } from '../engine/musecutEngine';
+import { browserVideoVolume, normalizeMixSettings, sliderToDb, type MixSettingKey } from '../lib/mixSettings';
 
 const EMOTION_COLORS: Record<string, string> = {
   calm: '#60a5fa', warm: '#fb923c', happy: '#facc15', intense: '#ef4444',
@@ -24,9 +25,11 @@ export default function EditorPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgmPollRef = useRef<number>(0);
+  const bgmCacheBustRef = useRef<number>(0);
   const autoBGMRef = useRef(false);
   const autoTimelineRef = useRef(false);
   const autoSaveTimerRef = useRef<number>(0);
+  const syncedPlaybackRef = useRef(false);
 
   const [timelineId, setTimelineId] = useState('');
   const [timelineData, setTimelineData] = useState<any>(null);
@@ -50,11 +53,16 @@ export default function EditorPage() {
   const [engineReady, setEngineReady] = useState(false);
   const [hasBGM, setHasBGM] = useState(false);
   const [mixStatus, setMixStatus] = useState('');
-  const [bgmVol, setBgmVol] = useState(80);
-  const [beatVol, setBeatVol] = useState(70);
-  const [sfxVol, setSfxVol] = useState(70);
+  const [originalVol, setOriginalVol] = useState(100);
+  const [bgmVol, setBgmVol] = useState(90);
+  const [beatVol, setBeatVol] = useState(18);
+  const [sfxVol, setSfxVol] = useState(15);
   const [masterVol, setMasterVol] = useState(90);
   const [generatingBGM, setGeneratingBGM] = useState(false);
+  const [semanticProfile, setSemanticProfile] = useState<any>(null);
+  const [semanticDraft, setSemanticDraft] = useState({ story_summary: '', music_director_brief: '' });
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [semanticSaving, setSemanticSaving] = useState(false);
 
   const loadUserSFXs = async () => {
     try { const r = await api.get('/assets/sfx'); setUserSFXs(r.data || []); } catch {}
@@ -95,11 +103,46 @@ export default function EditorPage() {
     } catch {}
   };
 
+  const applySemanticProfile = (profile: any) => {
+    const semantic = profile?.semantic_understanding || profile || {};
+    setSemanticProfile(semantic);
+    setSemanticDraft({
+      story_summary: semantic.story_summary || profile?.story_summary || '',
+      music_director_brief: semantic.music_director_brief || '',
+    });
+  };
+
+  const loadSemanticProfile = async () => {
+    if (!projectId) return;
+    setSemanticLoading(true);
+    try {
+      const r = await api.get(`/video/${projectId}/profile`);
+      applySemanticProfile(r.data);
+    } catch (e: any) {
+      const message = formatApiError(e, '读取视频语义理解失败', { action: 'load_video_semantics', projectId });
+      recordClientError('editor.load_semantics', message, e);
+      setError(message);
+    } finally {
+      setSemanticLoading(false);
+    }
+  };
+
+  const applyMixState = (data: any) => {
+    const mix = normalizeMixSettings(data?.mix_settings);
+    if (data) data.mix_settings = mix;
+    setOriginalVol(mix.original_volume);
+    setBgmVol(mix.bgm_volume);
+    setBeatVol(mix.beat_volume);
+    setSfxVol(mix.sfx_volume);
+    setMasterVol(mix.master_volume);
+  };
+
   useEffect(() => {
     if (!projectId) return;
     autoTimelineRef.current = false;
     autoBGMRef.current = false;
     loadProject();
+    loadSemanticProfile();
     loadTimeline();
   }, [projectId]);
 
@@ -109,6 +152,7 @@ export default function EditorPage() {
       setTimelineId(r.data.id);
       const parsed = JSON.parse(r.data.timeline_json);
       if (parsed.timeline && !Array.isArray(parsed.timeline)) parsed.timeline = [];
+      applyMixState(parsed);
       setTimelineData(parsed);
       setAutoSaveDirty(false);
       setHistory([]);
@@ -117,11 +161,12 @@ export default function EditorPage() {
   };
 
   const handleGenerate = async (style?: VideoType) => {
-    if (!projectId) return;
+    if (!projectId) return false;
     setGenerating(true); setError('');
     const targetStyle = style || projectStyle || 'campus_memory';
     try {
-      await api.get(`/video/${projectId}/profile`);
+      const profile = await api.get(`/video/${projectId}/profile`);
+      applySemanticProfile(profile.data);
       if (timelineId && style) {
         await api.post(`/timeline/${timelineId}/restyle`, { new_style: targetStyle });
       } else {
@@ -130,6 +175,7 @@ export default function EditorPage() {
       await loadTimeline();
       setHistory([]);
       setSelectedSeg(null);
+      return true;
     } catch (e: any) {
       const message = formatApiError(e, '生成 Music Timeline 失败', {
         action: 'generate_timeline',
@@ -139,8 +185,39 @@ export default function EditorPage() {
       });
       recordClientError('editor.generate_timeline', message, e);
       setError(message);
+      return false;
     }
     finally { setGenerating(false); }
+  };
+
+  const saveSemanticProfile = async (regenerate = false) => {
+    if (!projectId) return;
+    setSemanticSaving(true);
+    setError('');
+    try {
+      const r = await api.put(`/video/${projectId}/semantic`, semanticDraft);
+      applySemanticProfile(r.data);
+      setSaveNotice('视频理解已保存');
+      if (regenerate) {
+        const generated = await handleGenerate(projectStyle);
+        if (generated) {
+          await forceRegenerateBGM('semantic');
+        }
+      }
+    } catch (e: any) {
+      const message = formatApiError(e, '保存视频语义理解失败', { action: 'save_video_semantics', projectId });
+      recordClientError('editor.save_semantics', message, e);
+      setError(message);
+    } finally {
+      setSemanticSaving(false);
+    }
+  };
+
+  const regenerateStyleAndBGM = async (style: VideoType) => {
+    const generated = await handleGenerate(style);
+    if (generated) {
+      await forceRegenerateBGM('manual');
+    }
   };
 
   const saveTimeline = useCallback(async (source: 'manual' | 'auto' = 'manual') => {
@@ -204,6 +281,25 @@ export default function EditorPage() {
     });
   };
 
+  const setLocalMixValue = (field: MixSettingKey, value: number) => {
+    if (field === 'original_volume') setOriginalVol(value);
+    if (field === 'bgm_volume') setBgmVol(value);
+    if (field === 'beat_volume') setBeatVol(value);
+    if (field === 'sfx_volume') setSfxVol(value);
+    if (field === 'master_volume') setMasterVol(value);
+  };
+
+  const updateMixSetting = (field: MixSettingKey, value: number) => {
+    const mix = normalizeMixSettings({ ...(timelineData?.mix_settings || {}), [field]: value });
+    setLocalMixValue(field, mix[field]);
+    if (!timelineData) return;
+    const next = cloneTimeline(timelineData);
+    next.mix_settings = mix;
+    setTimelineData(next);
+    setAutoSaveDirty(true);
+    setSaveNotice('');
+  };
+
   const updateSegment = (idx: number, field: string, value: any) => {
     applyTimelineChange((next) => {
       const segs = [...next.timeline];
@@ -222,7 +318,8 @@ export default function EditorPage() {
         setHasBGM(true);
         setGeneratingBGM(false);
         if (engineReady || forceLoad) {
-          await audioEngine.loadBGM(`/api/generate/public/audio/latest/${projectId}`);
+          const cacheKey = bgmCacheBustRef.current || Date.now();
+          await audioEngine.loadBGM(`/api/generate/public/audio/latest/${projectId}?v=${cacheKey}`);
           if (timelineDataRef.current) audioEngine.scheduleTimeline(timelineDataRef.current);
         }
         setMixStatus('已开启 BGM / Beat / SFX 混音试听');
@@ -246,12 +343,41 @@ export default function EditorPage() {
     bgmPollRef.current = window.setInterval(async () => {
       attempts += 1;
       const loaded = await loadLatestBGM();
-      if (loaded || attempts >= 40) {
+      if (loaded || attempts >= 240) {
         window.clearInterval(bgmPollRef.current);
         if (!loaded) setGeneratingBGM(false);
       }
     }, 3000);
   }, [loadLatestBGM]);
+
+  const forceRegenerateBGM = useCallback(async (reason: 'semantic' | 'manual' = 'manual') => {
+    if (!projectId) return;
+    window.clearInterval(bgmPollRef.current);
+    bgmCacheBustRef.current = Date.now();
+    setHasBGM(false);
+    setGeneratingBGM(true);
+    setMixStatus(reason === 'semantic'
+      ? 'ACE 正在按新的视频理解重新生成完整 BGM'
+      : 'ACE 正在重新生成完整 BGM');
+    setSaveNotice('已提交 ACE 重新生成，完成前试听可能仍是旧音频或轻量点缀');
+    audioEngine.stop(false);
+    try {
+      const r = await api.post('/generate/bgm', { project_id: projectId, reason });
+      bgmCacheBustRef.current = Date.now();
+      setMixStatus(`ACE 已开始生成新 BGM（任务 ${String(r.data.session_id || '').slice(0, 8)}）`);
+      pollLatestBGM();
+    } catch (e: any) {
+      setGeneratingBGM(false);
+      const message = formatApiError(e, '提交 ACE 重新生成失败：当前项目只允许使用 ACE 生成音频', {
+        action: 'force_regenerate_bgm',
+        projectId,
+        reason,
+      });
+      recordClientError('editor.force_regenerate_bgm', message, e);
+      setError(message);
+      setMixStatus('ACE 重新生成失败，请检查错误提示');
+    }
+  }, [projectId, pollLatestBGM]);
 
   const ensureBGMGeneration = useCallback(async () => {
     if (!projectId || !timelineDataRef.current) return;
@@ -263,13 +389,13 @@ export default function EditorPage() {
         await api.post('/generate/bgm', { project_id: projectId });
       }
       setGeneratingBGM(true);
-      setMixStatus('BGM 生成中，当前可先听 Beat / SFX');
+      setMixStatus('完整 BGM 生成中；Beat / SFX 仅作为轻微点缀');
       pollLatestBGM();
     } catch (e: any) {
       const message = formatApiError(e, '自动生成 BGM 失败：当前项目只允许使用 ACE 生成音频', { action: 'editor_auto_generate_bgm', projectId });
       recordClientError('editor.auto_generate_bgm', message, e);
       setError(message);
-      setMixStatus('ACE 生成失败，当前只能先听 Beat / SFX');
+      setMixStatus('ACE 生成失败：未生成完整 BGM，不使用本地效果器替代');
     }
   }, [projectId, loadLatestBGM, pollLatestBGM]);
 
@@ -284,7 +410,7 @@ export default function EditorPage() {
     const loaded = await loadLatestBGM();
     if (!loaded) {
       setHasBGM(false);
-      setMixStatus(generatingBGM ? 'BGM 生成中，当前可先听 Beat / SFX' : '已开启 Beat / SFX 试听');
+      setMixStatus(generatingBGM ? '完整 BGM 生成中；点缀音轨会保持很轻' : '已开启轻量点缀音轨试听');
     }
   }, [loadLatestBGM, generatingBGM, userSFXs]);
 
@@ -313,11 +439,15 @@ export default function EditorPage() {
 
   useEffect(() => {
     if (!engineReady) return;
-    audioEngine.bgmVolume.volume.value = (bgmVol / 100) * 2 - 1;
-    audioEngine.beatVolume.volume.value = (beatVol / 100) * 2 - 1;
-    audioEngine.sfxVolume.volume.value = (sfxVol / 100) * 2 - 1;
-    audioEngine.masterVolume.volume.value = (masterVol / 100) * 2 - 1;
+    audioEngine.setBgmVolumeDb(sliderToDb(bgmVol));
+    audioEngine.beatVolume.volume.value = sliderToDb(beatVol);
+    audioEngine.sfxVolume.volume.value = sliderToDb(sfxVol);
+    audioEngine.masterVolume.volume.value = sliderToDb(masterVol);
   }, [bgmVol, beatVol, sfxVol, masterVol, engineReady]);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.volume = browserVideoVolume(originalVol);
+  }, [originalVol]);
 
   useEffect(() => () => {
     window.clearInterval(bgmPollRef.current);
@@ -333,12 +463,16 @@ export default function EditorPage() {
     try {
       if (!engineReady) await prepareEditorAudio();
       if (timelineDataRef.current) audioEngine.scheduleTimeline(timelineDataRef.current);
-      await audioEngine.play(target);
+      audioEngine.stop(false);
       video.currentTime = target;
+      video.volume = browserVideoVolume(originalVol);
       await video.play();
+      await audioEngine.play(target);
+      syncedPlaybackRef.current = true;
       setCurrentTime(target);
       setPlaying(true);
     } catch (e: any) {
+      syncedPlaybackRef.current = false;
       audioEngine.stop(false);
       setPlaying(false);
       const message = formatApiError(e, '混音试听启动失败，已尝试只播放视频原声', { action: 'editor_start_mix_preview', projectId, time: target });
@@ -346,6 +480,7 @@ export default function EditorPage() {
       setError(message);
       try {
         video.currentTime = target;
+        video.volume = browserVideoVolume(originalVol);
         await video.play();
         setPlaying(true);
       } catch {}
@@ -353,6 +488,7 @@ export default function EditorPage() {
   };
 
   const pauseSyncedPlayback = () => {
+    syncedPlaybackRef.current = false;
     videoRef.current?.pause();
     audioEngine.stop(false);
     setPlaying(false);
@@ -373,6 +509,8 @@ export default function EditorPage() {
     setCurrentTime(target);
     const video = videoRef.current;
     if (!video) return;
+    syncedPlaybackRef.current = false;
+    audioEngine.stop(false);
     video.currentTime = target;
     if (shouldPlay) {
       startSyncedPlayback(target);
@@ -411,9 +549,10 @@ export default function EditorPage() {
       }
     }
 
+    seekVideo(clickT);
+
     // Check BGM track click for selection
     if (clickY >= 5 && clickY <= 5 + trackH) {
-      seekVideo(clickT);
       for (let i = 0; i < segs.length; i++) {
         if (clickT >= segs[i].start && clickT <= segs[i].end) {
           setSelectedSeg(selectedSeg === i ? null : i);
@@ -502,6 +641,18 @@ export default function EditorPage() {
     // Beat Track
     const y2 = 5 + trackH + gap;
     ctx.fillStyle = '#f0f0f0'; ctx.fillRect(padL, y2, w - padL * 2, trackH);
+    (timelineData.beat_points || []).forEach((point: any) => {
+      const t = Number(point.time);
+      if (!Number.isFinite(t) || t < 0 || t > dur) return;
+      const x = scaleX(t);
+      const confidence = Math.max(0.25, Math.min(1, Number(point.confidence) || 0.5));
+      ctx.strokeStyle = point.type === 'onset' ? `rgba(239,68,68,${confidence})` : `rgba(249,115,22,${confidence})`;
+      ctx.lineWidth = point.type === 'onset' ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y2 + 5);
+      ctx.lineTo(x, y2 + trackH - 5);
+      ctx.stroke();
+    });
     segs.forEach((seg: any) => {
       if (seg.beat_pattern) { ctx.beginPath(); ctx.arc(scaleX((seg.start + seg.end) / 2), y2 + trackH / 2, 4, 0, Math.PI * 2); ctx.fillStyle = '#f97316'; ctx.fill(); }
     });
@@ -532,12 +683,45 @@ export default function EditorPage() {
   useEffect(() => { const onResize = () => drawTimeline(); window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize); }, [drawTimeline]);
   useEffect(() => {
     const v = videoRef.current; if (!v) return;
-    const tick = () => setCurrentTime(v.currentTime), end = () => { audioEngine.stop(); setPlaying(false); };
-    v.addEventListener('timeupdate', tick); v.addEventListener('ended', end);
-    return () => { v.removeEventListener('timeupdate', tick); v.removeEventListener('ended', end); };
-  }, []);
+    const stopSyncedAudio = (reset = false) => {
+      syncedPlaybackRef.current = false;
+      audioEngine.stop(reset);
+      setPlaying(false);
+    };
+    const tick = () => setCurrentTime(v.currentTime);
+    const pause = () => stopSyncedAudio(false);
+    const end = () => {
+      setCurrentTime(timelineDataRef.current?.duration || v.duration || v.currentTime);
+      stopSyncedAudio(true);
+    };
+    const wait = () => {
+      if (syncedPlaybackRef.current && !v.paused && !v.ended) stopSyncedAudio(false);
+    };
+    const seek = () => {
+      if (syncedPlaybackRef.current) stopSyncedAudio(false);
+    };
+    v.addEventListener('timeupdate', tick);
+    v.addEventListener('pause', pause);
+    v.addEventListener('ended', end);
+    v.addEventListener('waiting', wait);
+    v.addEventListener('seeking', seek);
+    return () => {
+      v.removeEventListener('timeupdate', tick);
+      v.removeEventListener('pause', pause);
+      v.removeEventListener('ended', end);
+      v.removeEventListener('waiting', wait);
+      v.removeEventListener('seeking', seek);
+    };
+  }, [projectId, timelineData]);
 
   const togglePlay = () => { const v = videoRef.current; if (!v) return; playing ? pauseSyncedPlayback() : startSyncedPlayback(v.currentTime); };
+  const stopPlaybackAndNavigate = (target: string) => {
+    syncedPlaybackRef.current = false;
+    videoRef.current?.pause();
+    audioEngine.stop(false);
+    setPlaying(false);
+    navigate(target);
+  };
 
   if (loading) return <div className="flex justify-center py-20"><Loader2 className="animate-spin text-primary" size={32} /></div>;
   const sel = selectedSeg !== null && timelineData ? timelineData.timeline[selectedSeg] : null;
@@ -558,7 +742,7 @@ export default function EditorPage() {
         </div>
         {timelineData && (
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => navigate(`/preview/${projectId}`)}
+            <button onClick={() => stopPlaybackAndNavigate(`/preview/${projectId}`)}
               className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90">
               <Play size={17} /> 预览成片
             </button>
@@ -598,6 +782,66 @@ export default function EditorPage() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="mb-6 rounded-lg border border-black/10 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-bold text-text-main">AI 对画面的理解</h2>
+            <p className="mt-1 text-sm leading-6 text-text-secondary">
+              配乐会优先参考这里的故事摘要和声音导演意图；觉得不准可以直接改。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full bg-primary/10 px-3 py-1 font-semibold text-primary">
+              {semanticProfile?.provider === 'qwen2.5-vl' ? 'Qwen2.5-VL 已启用' : semanticLoading ? '分析中' : '基础视觉理解'}
+            </span>
+            <span className="rounded-full bg-surface-warm px-3 py-1 font-semibold text-text-secondary">
+              OCR {semanticProfile?.ocr_enabled ? '已开启' : '未开启'}
+            </span>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-text-muted">故事摘要</span>
+            <textarea
+              value={semanticDraft.story_summary}
+              onChange={e => setSemanticDraft(prev => ({ ...prev, story_summary: e.target.value }))}
+              rows={4}
+              disabled={semanticLoading}
+              className="w-full resize-none rounded-lg bg-surface-warm px-3 py-2 text-sm leading-6 text-text-main focus:outline-none focus:ring-2 focus:ring-primary/25 disabled:opacity-60"
+              placeholder={semanticLoading ? '正在分析关键帧...' : '描述视频发生了什么、氛围和情绪走向'}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-text-muted">声音导演意图</span>
+            <textarea
+              value={semanticDraft.music_director_brief}
+              onChange={e => setSemanticDraft(prev => ({ ...prev, music_director_brief: e.target.value }))}
+              rows={4}
+              disabled={semanticLoading}
+              className="w-full resize-none rounded-lg bg-surface-warm px-3 py-2 text-sm leading-6 text-text-main focus:outline-none focus:ring-2 focus:ring-primary/25 disabled:opacity-60"
+              placeholder="例如：前半段克制、结尾温暖抬起；不要抢人声，不要堆音效"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap justify-end gap-2">
+          <button
+            onClick={() => saveSemanticProfile(false)}
+            disabled={semanticSaving || semanticLoading}
+            className="inline-flex items-center gap-2 rounded-lg border border-black/10 bg-white px-4 py-2 text-sm font-semibold text-text-secondary hover:border-primary hover:text-primary disabled:opacity-50"
+          >
+            {semanticSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} 保存理解
+          </button>
+          <button
+            onClick={() => saveSemanticProfile(true)}
+            disabled={semanticSaving || semanticLoading || generating}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {generating || semanticSaving ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+            {generating ? '正在重做声音方案' : semanticSaving ? '正在保存理解' : '按理解重做声音方案'}
+          </button>
+        </div>
       </div>
 
       {error && <div className="mb-4 whitespace-pre-wrap rounded-lg bg-red-50 px-4 py-3 font-mono text-xs leading-6 text-red-700">{error}</div>}
@@ -646,25 +890,26 @@ export default function EditorPage() {
                 </select>
               </div>
             </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               {[
-                { label: 'BGM', value: bgmVol, set: setBgmVol, muted: !hasBGM },
-                { label: 'Beat', value: beatVol, set: setBeatVol },
-                { label: 'SFX', value: sfxVol, set: setSfxVol },
-                { label: 'Master', value: masterVol, set: setMasterVol },
-              ].map(({ label, value, set, muted }) => (
+                { label: '原声', field: 'original_volume' as MixSettingKey, value: originalVol, max: 200 },
+                { label: 'BGM', field: 'bgm_volume' as MixSettingKey, value: bgmVol, max: 200, muted: !hasBGM },
+                { label: 'Beat', field: 'beat_volume' as MixSettingKey, value: beatVol, max: 120 },
+                { label: 'SFX', field: 'sfx_volume' as MixSettingKey, value: sfxVol, max: 120 },
+                { label: 'Master', field: 'master_volume' as MixSettingKey, value: masterVol, max: 140 },
+              ].map(({ label, field, value, max, muted }) => (
                 <label key={label} className="rounded-lg bg-surface-warm px-3 py-2">
                   <span className="mb-1 flex items-center justify-between text-xs text-text-muted">
                     <span>{label}</span>
-                    <span>{muted ? '待生成' : `${value}%`}</span>
+                    <span>{muted ? '生成中' : `${value}%`}</span>
                   </span>
                   <input
                     type="range"
                     min="0"
-                    max="100"
+                    max={max}
                     value={value}
                     disabled={muted}
-                    onChange={e => set(Number(e.target.value))}
+                    onChange={e => updateMixSetting(field, Number(e.target.value))}
                     className="w-full accent-primary disabled:opacity-40"
                   />
                 </label>
@@ -768,7 +1013,7 @@ export default function EditorPage() {
             <h3 className="font-semibold text-sm text-text-main mb-3">切换风格</h3>
             <div className="flex flex-wrap gap-2">
               {STYLE_LIST.map(s => (
-                <button key={s} onClick={() => handleGenerate(s)} disabled={generating}
+                <button key={s} onClick={() => regenerateStyleAndBGM(s)} disabled={generating || generatingBGM}
                   className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
                     timelineData.style === s ? 'bg-primary text-white' : 'bg-surface-warm text-text-secondary hover:bg-surface-warm/80'
                   }`}>{VIDEO_TYPE_LABELS[s]}</button>

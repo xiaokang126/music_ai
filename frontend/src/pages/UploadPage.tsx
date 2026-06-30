@@ -5,6 +5,7 @@ import { VIDEO_TYPE_LABELS, type VideoType } from '../types';
 import api from '../lib/api';
 import WorkflowGuide from '../components/project/WorkflowGuide';
 import { formatApiError, recordClientError } from '../lib/errorUtils';
+import { useAuth } from '../hooks/useAuth';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 type Step = 'upload' | 'keypoints' | 'done';
@@ -25,6 +26,7 @@ interface SceneChange { time: number; confidence: number; type: string; }
 
 export default function UploadPage() {
   const navigate = useNavigate();
+  const { isLoggedIn, loading: authLoading } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -34,6 +36,7 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [videoType, setVideoType] = useState<VideoType>('campus_memory');
   const [description, setDescription] = useState('');
+  const [enableOcr, setEnableOcr] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [projectId, setProjectId] = useState('');
   const [duration, setDuration] = useState(0);
@@ -49,11 +52,40 @@ export default function UploadPage() {
   useEffect(() => {
     const savedStory = localStorage.getItem('musecut_story_seed');
     const savedMode = localStorage.getItem('musecut_expression_mode') as VideoType | null;
+    const savedOcr = localStorage.getItem('musecut_enable_ocr');
     if (savedStory) setDescription(savedStory);
     if (savedMode && VIDEO_TYPE_LABELS[savedMode]) setVideoType(savedMode);
+    if (savedOcr === 'true') setEnableOcr(true);
   }, []);
 
+  const redirectToLogin = (reason = '上传视频和保存创作需要账号。登录后会自动回到创建页面。') => {
+    localStorage.setItem('musecut_current_video_type', videoType);
+    localStorage.setItem('musecut_expression_mode', videoType);
+    localStorage.setItem('musecut_story_seed', description.trim());
+    localStorage.setItem('musecut_enable_ocr', enableOcr ? 'true' : 'false');
+    navigate('/login', {
+      state: {
+        from: '/upload',
+        reason,
+      },
+    });
+  };
+
+  const ensureLoggedInForUpload = () => {
+    if (authLoading) {
+      setError('正在确认登录状态，请稍等片刻再上传。');
+      return false;
+    }
+    if (!isLoggedIn) {
+      setError('请先登录或注册账号，登录后会自动回到上传页面。');
+      redirectToLogin();
+      return false;
+    }
+    return true;
+  };
+
   const handleFile = (f: File) => {
+    if (!ensureLoggedInForUpload()) return;
     if (!f.type.startsWith('video/')) { setError('请上传视频文件'); return; }
     if (f.size > MAX_FILE_SIZE) { setError('文件不能超过100MB'); return; }
     setFile(f); setVideoUrl(URL.createObjectURL(f)); setError('');
@@ -65,17 +97,21 @@ export default function UploadPage() {
   };
 
   const handleUpload = async (mode: 'auto' | 'manual' = 'auto') => {
-    if (!file) return; setUploading(true);
+    if (!file) return;
+    if (!ensureLoggedInForUpload()) return;
+    setUploading(true);
     try {
       const fd = new FormData();
       fd.append('video', file);
       fd.append('video_type', videoType);
       fd.append('user_description', description);
+      fd.append('enable_ocr', enableOcr ? 'true' : 'false');
       const r = await api.post('/video/upload', fd);
       setProjectId(r.data.id);
       localStorage.setItem('musecut_current_project_id', r.data.id);
       localStorage.setItem('musecut_current_video_type', videoType);
       localStorage.setItem('musecut_story_seed', description.trim());
+      localStorage.setItem('musecut_enable_ocr', enableOcr ? 'true' : 'false');
       if (r.data.metadata_json) {
         setDuration(JSON.parse(r.data.metadata_json).duration || 0);
       }
@@ -86,7 +122,12 @@ export default function UploadPage() {
         navigate(`/editor/${r.data.id}`);
       }
     } catch (err: any) {
-      const message = formatApiError(err, '上传失败', { action: 'upload_video', file: file.name, videoType, mode });
+      if (err.response?.status === 401 || (err.response?.status === 403 && err.response?.data?.detail === 'Not authenticated')) {
+        setError('登录状态已失效，请重新登录后继续上传。');
+        redirectToLogin('登录状态已失效。请重新登录后继续上传视频。');
+        return;
+      }
+      const message = formatApiError(err, '上传失败', { action: 'upload_video', file: file.name, videoType, mode, enableOcr });
       recordClientError('upload.video', message, err);
       setError(message);
     }
@@ -213,9 +254,23 @@ export default function UploadPage() {
 
       {step === 'upload' && (
         <div className="space-y-6">
+          {!authLoading && !isLoggedIn && (
+            <div className="flex flex-col gap-3 rounded-lg border border-primary/20 bg-primary/10 px-4 py-4 text-sm text-primary md:flex-row md:items-center md:justify-between">
+              <span>上传视频、自动保存草稿和导出成片需要先登录或注册账号。</span>
+              <button
+                onClick={() => redirectToLogin()}
+                className="rounded-lg bg-primary px-4 py-2 font-semibold text-white hover:opacity-90"
+              >
+                去登录
+              </button>
+            </div>
+          )}
           {!file ? (
             <div onDragOver={e => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                if (!ensureLoggedInForUpload()) return;
+                fileInputRef.current?.click();
+              }}
               className={`cursor-pointer rounded-lg border-2 border-dashed p-12 text-center transition-all md:p-16 ${dragOver ? 'scale-[1.01] border-primary bg-primary/5' : 'border-text-muted/30 bg-white hover:border-primary/50'}`}>
               <input ref={fileInputRef} type="file" accept="video/*" className="hidden"
                 onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])} />
@@ -252,6 +307,25 @@ export default function UploadPage() {
                 <textarea value={description} onChange={e => setDescription(e.target.value)} maxLength={500} rows={3}
                   placeholder="例如：这是一段毕业前最后一次社团排练，我想保留大家说话的声音，在结尾做一点温暖的收束。"
                   className="w-full resize-none rounded-lg bg-surface-warm px-4 py-3 text-sm text-text-main placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-primary/30" />
+              </div>
+              <div className="glass rounded-lg p-5">
+                <label className="flex cursor-pointer items-center justify-between gap-4">
+                  <span className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Type size={20} />
+                    </span>
+                    <span>
+                      <span className="block text-sm font-semibold text-text-main">识别画面字幕 / OCR</span>
+                      <span className="mt-1 block text-xs text-text-muted">视频里有标题、字幕或屏幕文字时开启；不会自动转写语音。</span>
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={enableOcr}
+                    onChange={e => setEnableOcr(e.target.checked)}
+                    className="h-5 w-5 accent-primary"
+                  />
+                </label>
               </div>
               {error && <div className="whitespace-pre-wrap rounded-lg bg-red-50 px-4 py-3 font-mono text-xs leading-6 text-red-600">{error}</div>}
               <div className="grid gap-3 md:grid-cols-[1fr_auto]">

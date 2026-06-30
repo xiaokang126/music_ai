@@ -9,6 +9,7 @@ class MuseCutAudioEngine {
   private beatVol: Tone.Volume;
   private sfxVol: Tone.Volume;
   private masterVol: Tone.Volume;
+  private bgmBaseDb = -4;
   private kick: Tone.MembraneSynth;
   private snare: Tone.NoiseSynth;
   private hihat: Tone.MetalSynth;
@@ -16,13 +17,13 @@ class MuseCutAudioEngine {
   private initialized = false;
 
   private constructor() {
-    this.masterVol = new Tone.Volume(0).toDestination();
-    this.bgmVol = new Tone.Volume(0).connect(this.masterVol);
-    this.beatVol = new Tone.Volume(-3).connect(this.masterVol);
-    this.sfxVol = new Tone.Volume(-3).connect(this.masterVol);
-    this.kick = new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 4, volume: -4 }).connect(this.beatVol);
+    this.masterVol = new Tone.Volume(-2).toDestination();
+    this.bgmVol = new Tone.Volume(-4).connect(this.masterVol);
+    this.beatVol = new Tone.Volume(-26).connect(this.masterVol);
+    this.sfxVol = new Tone.Volume(-28).connect(this.masterVol);
+    this.kick = new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 4, volume: -10 }).connect(this.beatVol);
     this.snare = new Tone.NoiseSynth({ noise: { type: 'white' }, envelope: { attack: 0.001, decay: 0.15, sustain: 0 } }).connect(this.beatVol);
-    this.hihat = new Tone.MetalSynth({ envelope: { attack: 0.001, decay: 0.05 }, harmonicity: 5.1, modulationIndex: 32, resonance: 4000, volume: -10 }).connect(this.beatVol);
+    this.hihat = new Tone.MetalSynth({ envelope: { attack: 0.001, decay: 0.05 }, harmonicity: 5.1, modulationIndex: 32, resonance: 4000, volume: -18 }).connect(this.beatVol);
   }
 
   static getInstance(): MuseCutAudioEngine {
@@ -35,6 +36,11 @@ class MuseCutAudioEngine {
   get beatVolume() { return this.beatVol; }
   get sfxVolume() { return this.sfxVol; }
   get masterVolume() { return this.masterVol; }
+
+  setBgmVolumeDb(db: number): void {
+    this.bgmBaseDb = Number.isFinite(db) ? db : -80;
+    this.bgmVol.volume.value = db;
+  }
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -51,8 +57,8 @@ class MuseCutAudioEngine {
         url,
         onload: () => {
           this.bgmPlayer = player;
+          player.loop = true;
           player.connect(this.bgmVol);
-          this.syncBGMStart();
           resolve();
         },
         onerror: () => { reject(new Error('BGM load failed')); },
@@ -84,7 +90,6 @@ class MuseCutAudioEngine {
     Tone.Transport.cancel();
     const bpm = timeline.bpm || 82;
     Tone.Transport.bpm.value = bpm;
-    this.syncBGMStart();
 
     const segs = timeline.timeline || [];
     segs.forEach((seg: any) => {
@@ -96,9 +101,26 @@ class MuseCutAudioEngine {
       }
     });
 
+    (timeline.beat_points || []).slice(0, 260).forEach((point: any) => {
+      const t = Number(point.time);
+      if (!Number.isFinite(t) || t < 0) return;
+      this.scheduleBeatPoint(t, point.type || 'beat', Number(point.confidence) || 0.5);
+    });
+
     (timeline.ducking_schedule || []).forEach((d: DuckingNode) => {
       this.scheduleDucking(d);
     });
+  }
+
+  private scheduleBeatPoint(timeSeconds: number, kind: string, confidence: number): void {
+    const velocity = Math.max(0.08, Math.min(0.22, 0.08 + confidence * 0.12));
+    Tone.Transport.schedule((time) => {
+      if (kind === 'onset') {
+        this.snare.triggerAttackRelease('32n', time, velocity * 0.7);
+      } else {
+        this.hihat.triggerAttackRelease('64n', time, velocity);
+      }
+    }, timeSeconds);
   }
 
   private scheduleBeat(pattern: string, startT: number, endT: number, bpm: number): void {
@@ -133,32 +155,34 @@ class MuseCutAudioEngine {
 
   private scheduleDucking(d: DuckingNode): void {
     Tone.Transport.schedule(() => {
-      this.bgmVol.volume.rampTo(-d.reduce_db, 0.1);
+      const base = Number.isFinite(this.bgmBaseDb) ? this.bgmBaseDb : -80;
+      this.bgmVol.volume.rampTo(base - Math.abs(d.reduce_db || 0), 0.12);
     }, d.start);
     Tone.Transport.schedule(() => {
-      this.bgmVol.volume.rampTo(0, 0.3);
+      const base = Number.isFinite(this.bgmBaseDb) ? this.bgmBaseDb : -80;
+      this.bgmVol.volume.rampTo(base, 0.35);
     }, d.end);
-  }
-
-  private syncBGMStart(): void {
-    if (!this.bgmPlayer) return;
-    try {
-      this.bgmPlayer.unsync();
-    } catch {
-      // Tone versions differ slightly; a fresh player may not be synced yet.
-    }
-    this.bgmPlayer.sync().start(0);
   }
 
   async play(fromSeconds = 0): Promise<void> {
     if (!this.initialized) await this.init();
+    const offset = Math.max(0, fromSeconds);
     Tone.Transport.stop();
-    (Tone.Transport as any).seconds = Math.max(0, fromSeconds);
-    Tone.Transport.start();
+    this.bgmPlayer?.stop();
+    this.bgmVol.volume.value = Number.isFinite(this.bgmBaseDb) ? this.bgmBaseDb : -80;
+    (Tone.Transport as any).seconds = offset;
+    Tone.Transport.start('+0.02', offset);
+    if (this.bgmPlayer?.loaded) {
+      const duration = this.bgmPlayer.buffer.duration;
+      const bgmOffset = duration > 0 ? Math.min(offset % duration, Math.max(0, duration - 0.05)) : 0;
+      this.bgmPlayer.start('+0.02', bgmOffset);
+    }
   }
 
   stop(reset = true): void {
     Tone.Transport.stop();
+    this.bgmPlayer?.stop();
+    this.bgmVol.volume.value = Number.isFinite(this.bgmBaseDb) ? this.bgmBaseDb : -80;
     if (reset) {
       (Tone.Transport as any).seconds = 0;
     }

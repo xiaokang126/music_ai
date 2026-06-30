@@ -68,6 +68,28 @@ def _mark_generation_failed(db: Session, session: GenerationSession, message: st
         task.error_msg = message
 
 
+def _timeline_duration_seconds(timeline_json: str) -> float:
+    try:
+        data = json.loads(timeline_json or "{}")
+    except json.JSONDecodeError:
+        return 0.0
+    duration = float(data.get("duration") or 0)
+    for seg in data.get("timeline", []) or []:
+        try:
+            duration = max(duration, float(seg.get("end", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+    return duration
+
+
+def _audio_duration_seconds(path: str) -> float:
+    try:
+        from pydub import AudioSegment
+        return len(AudioSegment.from_file(path)) / 1000
+    except Exception:
+        return 0.0
+
+
 @router.post("/sessions", response_model=GenerationSessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_session(
     data: GenerationSessionCreate,
@@ -187,6 +209,7 @@ async def start_generation(
 @router.get("/by-project/{project_id}")
 async def get_by_project(project_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Check if BGM has been generated for this project."""
+    timeline = db.query(MusicTimeline).filter(MusicTimeline.project_id == project_id).first()
     session = db.query(GenerationSession).filter(
         GenerationSession.project_id == project_id
     ).order_by(GenerationSession.created_at.desc()).first()
@@ -195,12 +218,28 @@ async def get_by_project(project_id: str, current_user: User = Depends(get_curre
     if session and session.full_audio_path:
         import os
         if os.path.exists(session.full_audio_path):
+            expected_duration = _timeline_duration_seconds(timeline.timeline_json) if timeline else 0.0
+            audio_duration = _audio_duration_seconds(session.full_audio_path)
+            if expected_duration and audio_duration + 0.75 < expected_duration:
+                return {
+                    "audio_url": "",
+                    "status": "stale",
+                    "progress": 0,
+                    "error_message": (
+                        f"现有 BGM 时长 {audio_duration:.2f}s，短于当前 Timeline {expected_duration:.2f}s，"
+                        "需要重新生成以覆盖完整视频。"
+                    ),
+                    "audio_duration": audio_duration,
+                    "expected_duration": expected_duration,
+                }
             progress = 100 if session.total_tasks == 0 else int(session.completed_tasks / session.total_tasks * 100)
             return {
                 "audio_url": f"/api/generate/audio/latest/{project_id}",
                 "status": session.status,
                 "progress": progress,
                 "error_message": "",
+                "audio_duration": audio_duration,
+                "expected_duration": expected_duration,
             }
     progress = 0 if session.total_tasks == 0 else int(session.completed_tasks / session.total_tasks * 100)
     return {

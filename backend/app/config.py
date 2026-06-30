@@ -1,6 +1,8 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv()
 
 
@@ -17,6 +19,12 @@ class Settings:
     # ACE-Step API
     ACESTEP_API_URL: str = os.getenv("ACESTEP_API_URL", "http://localhost:8001")
     ACESTEP_MOCK_MODE: str = os.getenv("ACESTEP_MOCK_MODE", "auto")
+
+    # Video semantic understanding
+    QWEN_VL_MODEL_PATH: str = os.getenv("QWEN_VL_MODEL_PATH", "")
+    QWEN_VL_ALLOW_REMOTE: bool = os.getenv("QWEN_VL_ALLOW_REMOTE", "false").lower() == "true"
+    QWEN_VL_MAX_FRAMES: int = int(os.getenv("QWEN_VL_MAX_FRAMES", "5"))
+    QWEN_VL_DEVICE_MAP: str = os.getenv("QWEN_VL_DEVICE_MAP", "auto")
 
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "musecut_jwt_secret_key_2026")

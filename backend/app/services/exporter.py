@@ -1,10 +1,12 @@
 import os
 import re
+import math
 import subprocess
 import tempfile
 from typing import Optional
 
 from pydub import AudioSegment
+from pydub.effects import compress_dynamic_range
 from pydub.generators import Sine, WhiteNoise
 
 
@@ -58,6 +60,23 @@ def _float_value(value, default: float) -> float:
 
 def _int_bpm(timeline_data: dict) -> int:
     return int(_clamp(_float_value(timeline_data.get("bpm"), 90), 40, 200))
+
+
+def _mix_settings(timeline_data: dict) -> dict:
+    settings = timeline_data.get("mix_settings") if isinstance(timeline_data, dict) else None
+    return settings if isinstance(settings, dict) else {}
+
+
+def _percent_to_gain_db(value, default: float = 100.0) -> float:
+    percent = _clamp(_float_value(value, default), 0.0, 240.0)
+    if percent <= 0:
+        return -120.0
+    return 20.0 * math.log10(percent / 100.0)
+
+
+def _percent_to_ffmpeg_volume(value, default: float = 100.0) -> float:
+    percent = _clamp(_float_value(value, default), 0.0, 240.0)
+    return percent / 100.0
 
 
 def _key_parts(key: str) -> tuple[str, str]:
@@ -212,7 +231,7 @@ def _render_chord_layer(timeline_data: dict, seg: dict, duration: int) -> AudioS
         root_pad = _safe_tone(freqs[0] / 2, length, gain - 10).low_pass_filter(650)
         upper_air = _safe_tone(freqs[-1] * 2, length, gain - 17 + energy * 2).high_pass_filter(900)
         chord_audio = chord_audio.overlay(root_pad).overlay(upper_air)
-        fade = min(450, max(80, length // 4))
+        fade = min(90, max(24, length // 24))
         layer = layer.overlay(chord_audio.fade_in(fade).fade_out(fade), position=position)
         position += length
         chord_index += 1
@@ -280,7 +299,7 @@ def _render_texture_layer(seg: dict, duration: int) -> AudioSegment:
     energy = _clamp(_float_value(seg.get("energy"), 0.45), 0, 1)
     texture = WhiteNoise().to_audio_segment(duration=duration)
     texture = texture.high_pass_filter(6500).low_pass_filter(12000).apply_gain(-48 + energy * 3)
-    return texture.fade_in(min(500, duration // 4)).fade_out(min(650, duration // 3)).set_channels(2)
+    return texture.fade_in(min(180, duration // 5)).fade_out(min(220, duration // 5)).set_channels(2)
 
 
 def _render_segment_music(timeline_data: dict, seg: dict, duration: int, is_first: bool, is_last: bool) -> AudioSegment:
@@ -290,9 +309,24 @@ def _render_segment_music(timeline_data: dict, seg: dict, duration: int, is_firs
     segment = segment.overlay(_render_motif_layer(timeline_data, seg, duration))
     segment = segment.overlay(_render_texture_layer(seg, duration))
 
-    fade_in = 650 if is_first or seg.get("fade") == "fade_in" else 250
-    fade_out = 850 if is_last or seg.get("fade") in {"fade_out", "fade_out_start"} else 320
-    return segment.fade_in(min(fade_in, duration // 3)).fade_out(min(fade_out, duration // 3))
+    if is_first:
+        segment = segment.fade_in(min(420, duration // 3))
+    if is_last:
+        segment = segment.fade_out(min(700, duration // 3))
+    return segment
+
+
+def _smooth_synth_dynamics(audio: AudioSegment) -> AudioSegment:
+    try:
+        return compress_dynamic_range(
+            audio,
+            threshold=-24.0,
+            ratio=2.0,
+            attack=8.0,
+            release=180.0,
+        )
+    except Exception:
+        return audio
 
 
 def _synth_bgm(timeline_data: dict) -> AudioSegment:
@@ -314,7 +348,8 @@ def _synth_bgm(timeline_data: dict) -> AudioSegment:
             is_last=i == len(timeline) - 1,
         )
         base = base.overlay(segment, position=start)
-    return _master_music(base.fade_in(min(450, target_ms // 5)).fade_out(min(900, target_ms // 4)), target_peak=-4.0)
+    base = _smooth_synth_dynamics(base)
+    return _master_music(base.fade_in(min(350, target_ms // 5)).fade_out(min(800, target_ms // 4)), target_peak=-4.0)
 
 
 def _apply_ducking(bgm: AudioSegment, timeline_data: dict) -> AudioSegment:
@@ -345,6 +380,20 @@ def _render_beat_track(timeline_data: dict, target_ms: int) -> AudioSegment:
     beat = AudioSegment.silent(duration=target_ms).set_channels(2)
     bpm = max(40, min(200, int(timeline_data.get("bpm", 90) or 90)))
     beat_ms = int(60000 / bpm)
+
+    for point in timeline_data.get("beat_points", []) or []:
+        try:
+            pos = int(float(point.get("time", 0) or 0) * 1000)
+        except (TypeError, ValueError):
+            continue
+        if pos < 0 or pos >= target_ms:
+            continue
+        confidence = _clamp(_float_value(point.get("confidence"), 0.5), 0.0, 1.0)
+        if point.get("type") == "onset":
+            accent = WhiteNoise().to_audio_segment(duration=45).high_pass_filter(1800).apply_gain(-34 + confidence * 4)
+        else:
+            accent = Sine(120).to_audio_segment(duration=55).apply_gain(-33 + confidence * 4).fade_out(45)
+        beat = beat.overlay(accent.set_channels(2), position=pos)
 
     for seg in timeline_data.get("timeline", []) or []:
         pattern = seg.get("beat_pattern")
@@ -410,11 +459,20 @@ def render_mixed_audio(
     custom_sfx_paths: Optional[dict[str, str]] = None,
 ) -> str:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    bgm = _apply_ducking(_load_bgm(bgm_path, timeline_data), timeline_data)
+    mix = _mix_settings(timeline_data)
+    bgm = _apply_ducking(_load_bgm(bgm_path, timeline_data), timeline_data).apply_gain(
+        _percent_to_gain_db(mix.get("bgm_volume"), 90.0)
+    )
     target_ms = _duration_ms(timeline_data, bgm)
-    beat = _render_beat_track(timeline_data, target_ms)
-    sfx = _render_sfx_track(timeline_data, target_ms, custom_sfx_paths)
-    mixed = _master_music(bgm.overlay(beat).overlay(sfx), target_peak=-1.2)
+    beat = _render_beat_track(timeline_data, target_ms).apply_gain(
+        _percent_to_gain_db(mix.get("beat_volume"), 18.0)
+    )
+    sfx = _render_sfx_track(timeline_data, target_ms, custom_sfx_paths).apply_gain(
+        _percent_to_gain_db(mix.get("sfx_volume"), 15.0)
+    )
+    mixed = _master_music(bgm.overlay(beat).overlay(sfx), target_peak=-1.2).apply_gain(
+        _percent_to_gain_db(mix.get("master_volume"), 90.0)
+    )
 
     export_format = "mp3" if fmt == "mp3" else fmt
     kwargs = {"bitrate": "320k"} if fmt == "mp3" else {}
@@ -447,23 +505,44 @@ def _video_has_audio(video_path: str) -> bool:
         return False
 
 
-def _mux_video_with_music(video_path: str, music_path: str, output_path: str, transcode_video: bool = False) -> None:
+def _mux_video_with_music(
+    video_path: str,
+    music_path: str,
+    output_path: str,
+    transcode_video: bool = False,
+    original_volume: float = 100.0,
+    music_volume: float = 100.0,
+) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     has_audio = _video_has_audio(video_path)
-    video_codec = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"] if transcode_video else ["-c:v", "copy"]
+    video_codec = ["-c:v", "mpeg4", "-q:v", "4", "-pix_fmt", "yuv420p"] if transcode_video else ["-c:v", "copy"]
     cmd = ["ffmpeg", "-y", "-i", video_path, "-i", music_path]
+    original_factor = _percent_to_ffmpeg_volume(original_volume, 100.0)
+    music_factor = _percent_to_ffmpeg_volume(music_volume, 100.0)
 
     if has_audio:
         cmd += [
             "-filter_complex",
-            "[1:a:0]volume=0.82[music];[0:a:0][music]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+            (
+                f"[0:a:0]volume={original_factor:.4f}[orig];"
+                f"[1:a:0]volume={music_factor:.4f}[music];"
+                "[orig][music]amix=inputs=2:duration=first:dropout_transition=0,"
+                "alimiter=limit=0.97[aout]"
+            ),
             "-map",
             "0:v:0",
             "-map",
             "[aout]",
         ]
     else:
-        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+        cmd += [
+            "-filter_complex",
+            f"[1:a:0]volume={music_factor:.4f}[music]",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[music]",
+        ]
 
     cmd += video_codec + ["-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -488,12 +567,26 @@ def render_video_with_mixed_audio(
     tmp.close()
 
     try:
+        mix = _mix_settings(timeline_data)
+        original_volume = mix.get("original_volume", 100.0)
         render_mixed_audio(timeline_data, bgm_path, tmp_audio_path, "wav", custom_sfx_paths)
         try:
-            _mux_video_with_music(video_path, tmp_audio_path, output_path, transcode_video=False)
+            _mux_video_with_music(
+                video_path,
+                tmp_audio_path,
+                output_path,
+                transcode_video=False,
+                original_volume=original_volume,
+            )
         except subprocess.CalledProcessError as copy_exc:
             try:
-                _mux_video_with_music(video_path, tmp_audio_path, output_path, transcode_video=True)
+                _mux_video_with_music(
+                    video_path,
+                    tmp_audio_path,
+                    output_path,
+                    transcode_video=True,
+                    original_volume=original_volume,
+                )
             except subprocess.CalledProcessError as transcode_exc:
                 raise RuntimeError(
                     "MP4 export failed. "

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { registerUser, loginUser } from '../services/authService';
 
@@ -11,6 +11,9 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const state = location.state as { from?: string; reason?: string } | null;
+  const returnTo = state?.from || '/profile';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +27,7 @@ export default function LoginPage() {
     fn(username, password)
       .then(({ token, user }) => {
         login(user, token);
-        navigate('/profile');
+        navigate(returnTo, { replace: true });
       })
       .catch((err: unknown) => {
         console.error('Auth error:', err);
@@ -52,6 +55,11 @@ export default function LoginPage() {
           <h1 className="text-2xl font-bold text-text-main">MuseCut</h1>
           <p className="text-text-muted text-sm mt-1">AI短视频配乐导演</p>
         </div>
+        {state?.reason && (
+          <div className="mb-5 rounded-xl bg-primary/10 px-4 py-3 text-sm leading-6 text-primary">
+            {state.reason}
+          </div>
+        )}
 
         <div className="flex bg-surface-warm rounded-xl p-1 mb-6">
           {(['login', 'register'] as const).map((t) => (

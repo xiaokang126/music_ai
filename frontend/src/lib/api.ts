@@ -17,7 +17,10 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.detail;
+    const authMissing = status === 401 || (status === 403 && detail === 'Not authenticated');
+    if (authMissing) {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
     }
